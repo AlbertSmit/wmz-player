@@ -1,0 +1,206 @@
+# WMZ Player
+
+**Windows Media Player skins, as a macOS media remote.**
+
+WMZ Player opens the `.wmz` skins people made for Windows Media Player 7–11 and
+turns them into a small, shaped window that controls Apple Music or Spotify.
+The dial, the artwork, the transport buttons, the seek and volume sliders — they
+all still work.
+
+It is not a media player and not an emulator. It reads the skin, keeps what it
+can render faithfully, and maps the media controls onto the player that is
+actually running.
+
+```
+ Halo_2.wmz  ──▶  parse WML  ──▶  shaped window  ──▶  AppleScript  ──▶  Music / Spotify
+```
+
+> Bring your own skins. This repository ships no `.wmz` files and no Microsoft
+> or third-party artwork.
+
+---
+
+## Features
+
+- **Real skins, not approximations.** Reads the `.wms` definition, background
+  layers, tiled subviews and per-control images.
+- **Shaped, transparent windows.** The classic transparency-colour trick is
+  honoured (`transparencyColor`, and WMP7's `clippingColor`), including artwork
+  that uses different keys in different regions.
+- **Hit zones from the artwork.** Button groups use the skin's coloured
+  `mappingImage`, so an irregular Halo transport cluster behaves like the
+  original — not like a bounding box.
+- **Working sliders.** Seek and volume read the position map, follow arcs and
+  diagonals, and know which way the artwork fills.
+- **Live metadata.** Track title, artist and the ten-digit `time1…time4` image
+  strips update while the music plays.
+- **Apple Music or Spotify**, chosen automatically or pinned in the menu.
+- **Double size, always-on-top, draggable** from anywhere that is not a control.
+- **A CLI for skinsmiths**: inspect a skin, render it offscreen, or ask what a
+  click at a coordinate would do.
+
+## Requirements
+
+- macOS 13 or newer
+- Xcode command line tools (Swift 6)
+
+## Install
+
+There is no signed binary yet — build it:
+
+```sh
+git clone https://github.com/AlbertSmit/wmz-player.git
+cd wmz-player
+./scripts/build-app.sh
+open dist/WMZPlayer.app --args ~/Downloads/Halo_2.wmz
+```
+
+The script produces `dist/WMZPlayer.app` (ad-hoc signed) and copies the `wmz`
+CLI into the bundle.
+
+On first use macOS asks for permission to control Apple Music or Spotify.
+Without that permission the skin is only a picture.
+
+## Using a skin
+
+| Action | How |
+| --- | --- |
+| Open a skin | Double-click the `.wmz`, or **File → Open Skin…** (`⌘O`) |
+| Play / pause | Click the skin's button, or press **Space** |
+| Seek | Drag the skin's seek control, or press **← / →** |
+| Volume | Drag the skin's volume control, or press **↑ / ↓** |
+| Move the window | Drag any non-control part of the skin |
+| Menu | Right-click / control-click the skin |
+| Player choice | **Player → Automatic / Apple Music / Spotify** |
+| Size and stacking | **Window → Double Size**, **Always on Top** |
+
+The last skin is remembered.
+
+## Command line
+
+`wmz` is built alongside the app:
+
+```sh
+wmz inspect  <skin.wmz>                  # views, controls, resolved actions
+wmz render   <skin.wmz> --out preview.png
+             [--scale 2] [--on 202020] [--view <id>] [--playing]
+wmz hit      <skin.wmz> --at 230,190     # what a click at that point would do
+wmz media                                # what the media controller sees
+```
+
+`render --on <hex>` fills the background first, which is the only sane way to
+look at skins with large transparent areas. `inspect` prints the resolved
+geometry tree, with the image and key colour of each node.
+
+`wmz hit` is the quickest way to debug a control without clicking:
+
+```console
+$ wmz hit Halo_2.wmz --at 230,190 --playing
+action pause on buttongroup
+
+$ wmz hit Halo_2.wmz --at 242,70 --playing
+slider seek = 94% on seek
+```
+
+## How a skin is read
+
+A `.wmz` is a ZIP containing a `.wms` definition plus bitmaps. The definition is
+XML — but written for WMP's forgiving parser, not for a strict one. Roughly a
+third of the archived skins fail `NSXMLParser`, so `LenientXML` handles missing
+spaces between attributes, duplicate attributes, unquoted values, bare
+ampersands and ANSI encodings.
+
+The renderer supports the parts that carry the look of a skin:
+
+| Area | What is understood |
+| --- | --- |
+| Layout | `<view>` / `<subview>` with `left`/`top`/`width`/`height`, alignment, `zIndex`, and the arithmetic subset of `jscript:` used for layout (`view.width-43`) |
+| Artwork | `backgroundImage` (plain and tiled), `backgroundColor`, transparency keying |
+| Controls | `<button>` normal/hover/down states, `<buttongroup>` with `mappingImage` zones |
+| Sliders | `<customSlider>` sprite strips; direction fitted from the artwork |
+| Text | font, size, colour, justification, `wmpprop:` bindings, title/artist/time |
+| Video | `<video>` becomes the current track's artwork |
+
+Commands are resolved in order: the semantic element (`playelement`,
+`nextelement`, …), the `onClick` script text (`player.controls.next()`), then
+the control's id or image name (`m_pause_no.png`).
+
+AppleScript is used for transport, so the app must be allowed to automate
+Music/Spotify. Writes to the player (seek, volume) are coalesced: Music can
+apply overlapping `set` events out of order and drop the newer one.
+
+## Compatibility
+
+Tested against the 175-skin Windows Media Player archive: **171 load and
+render**. The four failures are three Windows installers that were distributed
+with a `.wmz` extension and one damaged ZIP.
+
+Skins that build their interface from JScript at runtime — Microsoft's own
+*9 Series Default* is the clearest example — render only their static parts.
+
+### Known limits
+
+- The skin's JScript is **not** executed.
+- Playlists, equalizer, visualizations, video surfaces and entrance animations
+  are ignored; skin sound effects are not played.
+- No media-key synthesis: this is a remote for Music/Spotify, not a global
+  now-playing controller.
+- The renderer is intentionally a subset of WMP's UI vocabulary. If a skin looks
+  wrong, `wmz inspect` will usually show why.
+
+## Architecture
+
+```mermaid
+flowchart LR
+    wmz[.wmz archive] --> loader[SkinLoader]
+    loader --> wml[LenientXML → Element tree]
+    wml --> scene[Scene<br/>layout + hit test]
+    scene --> render[SceneRenderer]
+    scene --> actions[ActionResolver]
+    actions --> media[MediaController]
+    media --> music[Apple Music]
+    media --> spotify[Spotify]
+    render --> view[SkinView]
+    view --> actions
+```
+
+```
+Sources/WMZKit/          engine
+  SkinLoader.swift       unpack .wmz, find .wms
+  WML.swift              element tree + encodings
+  LenientXML.swift       tolerant XML scanner
+  Expression.swift       jscript layout arithmetic
+  Scene.swift            layout, slider geometry, hit testing
+  SceneRenderer.swift    drawing
+  SkinAssets.swift       images, transparency keying, sprite frames
+  ActionResolver.swift   WMP commands → MediaAction
+  MediaController.swift  AppleScript backends
+Sources/WMZPlayer/       AppKit app (window, menu, input)
+Sources/wmz/             CLI
+scripts/build-app.sh     .app bundle
+```
+
+## Development
+
+```sh
+swift build                 # engine + app + CLI
+swift build -c release
+./scripts/build-app.sh      # bundle in dist/
+```
+
+Useful probes while working on a skin:
+
+```sh
+wmz inspect skin.wmz | less
+wmz render skin.wmz --out skin.png --on 202020 --scale 2
+open skin.png
+```
+
+The app also accepts two hidden test flags: `--click x,y` and
+`--drag x1,y1,x2,y2` (coordinates in skin pixels), which drive the same code
+path as a real mouse event.
+
+## License
+
+MIT — see [LICENSE](LICENSE). Not affiliated with Microsoft. Windows Media
+Player and any skins you load remain the property of their respective authors.
