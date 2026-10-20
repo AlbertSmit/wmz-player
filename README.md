@@ -3,16 +3,16 @@
 **Windows Media Player skins, as a macOS media remote.**
 
 WMZ Player opens the `.wmz` skins people made for Windows Media Player 7–11 and
-turns them into a small, shaped window that controls Apple Music or Spotify.
-The dial, the artwork, the transport buttons, the seek and volume sliders — they
-all still work.
+turns them into a small, shaped window that controls Apple Music, Spotify or
+Tidal. The dial, the artwork, the transport buttons, the seek and volume sliders
+— they all still work.
 
 It is not a media player and not an emulator. It reads the skin, keeps what it
 can render faithfully, and maps the media controls onto the player that is
 actually running.
 
 ```
- Halo_2.wmz  ──▶  parse WML  ──▶  shaped window  ──▶  AppleScript  ──▶  Music / Spotify
+ Halo_2.wmz  ──▶  parse WML  ──▶  shaped window  ──▶  AppleScript / Now Playing  ──▶  your player
 ```
 
 > Bring your own skins. This repository ships no `.wmz` files and no Microsoft
@@ -34,7 +34,7 @@ actually running.
   diagonals, and know which way the artwork fills.
 - **Live metadata.** Track title, artist and the ten-digit `time1…time4` image
   strips update while the music plays.
-- **Apple Music or Spotify**, chosen automatically or pinned in the menu.
+- **Apple Music, Spotify and Tidal**, chosen automatically or pinned in the menu.
 - **Double size, always-on-top, draggable** from anywhere that is not a control.
 - **A CLI for skinsmiths**: inspect a skin, render it offscreen, or ask what a
   click at a coordinate would do.
@@ -46,7 +46,15 @@ actually running.
 
 ## Install
 
-There is no signed binary yet — build it:
+There is no notarised binary yet. [Release v0.1-alpha](https://github.com/AlbertSmit/wmz-player/releases)
+has a zipped build; because it is ad-hoc signed, macOS quarantines it. Either
+right-click the app and choose **Open**, or clear the flag once:
+
+```sh
+xattr -dr com.apple.quarantine /Applications/WMZPlayer.app
+```
+
+Or build it yourself:
 
 ```sh
 git clone https://github.com/AlbertSmit/wmz-player.git
@@ -55,11 +63,11 @@ cd wmz-player
 open dist/WMZPlayer.app --args ~/Downloads/Halo_2.wmz
 ```
 
-The script produces `dist/WMZPlayer.app` (ad-hoc signed) and copies the `wmz`
-CLI into the bundle.
+The script produces `dist/WMZPlayer.app` and copies the `wmz` CLI into the
+bundle.
 
 On first use macOS asks for permission to control Apple Music or Spotify.
-Without that permission the skin is only a picture.
+Without that permission those two players cannot be driven.
 
 ## Using a skin
 
@@ -71,10 +79,27 @@ Without that permission the skin is only a picture.
 | Volume | Drag the skin's volume control, or press **↑ / ↓** |
 | Move the window | Drag any non-control part of the skin |
 | Menu | Right-click / control-click the skin |
-| Player choice | **Player → Automatic / Apple Music / Spotify** |
+| Player choice | **Player → Automatic / Apple Music / Spotify / Tidal** |
 | Size and stacking | **Window → Double Size**, **Always on Top** |
 
 The last skin is remembered.
+
+## Players
+
+| Player | Transport | Track info | Volume |
+| --- | --- | --- | --- |
+| Apple Music | AppleScript | yes | app volume |
+| Spotify | AppleScript | yes | app volume |
+| Tidal | macOS Now Playing | best effort | system output volume |
+
+Tidal has no AppleScript dictionary, so it is driven through the same private
+`MediaRemote` channel the media keys use. Sending commands works everywhere;
+**reading** the now-playing title/artist/position is restricted to Apple-signed
+processes on recent macOS. Where the read is allowed (macOS 15.3 and earlier),
+Tidal shows full metadata. Where it is not, the skin still plays, pauses, skips
+and stops, but the title area stays empty and the seek slider is inert.
+
+`Automatic` picks whichever of the three is actually playing.
 
 ## Command line
 
@@ -85,7 +110,8 @@ wmz inspect  <skin.wmz>                  # views, controls, resolved actions
 wmz render   <skin.wmz> --out preview.png
              [--scale 2] [--on 202020] [--view <id>] [--playing]
 wmz hit      <skin.wmz> --at 230,190     # what a click at that point would do
-wmz media                                # what the media controller sees
+wmz media    [--target music|spotify|tidal|auto] [--seconds <n>]
+             [--bundle <fragment>]       # read any app through Now Playing
 ```
 
 `render --on <hex>` fills the background first, which is the only sane way to
@@ -125,9 +151,9 @@ Commands are resolved in order: the semantic element (`playelement`,
 `nextelement`, …), the `onClick` script text (`player.controls.next()`), then
 the control's id or image name (`m_pause_no.png`).
 
-AppleScript is used for transport, so the app must be allowed to automate
-Music/Spotify. Writes to the player (seek, volume) are coalesced: Music can
-apply overlapping `set` events out of order and drop the newer one.
+AppleScript drives Music and Spotify. Writes to the player (seek, volume) are
+coalesced: Music can apply overlapping `set` events out of order and drop the
+newer one.
 
 ## Compatibility
 
@@ -143,8 +169,7 @@ Skins that build their interface from JScript at runtime — Microsoft's own
 - The skin's JScript is **not** executed.
 - Playlists, equalizer, visualizations, video surfaces and entrance animations
   are ignored; skin sound effects are not played.
-- No media-key synthesis: this is a remote for Music/Spotify, not a global
-  now-playing controller.
+- Tidal's metadata and seeking depend on the macOS build (see [Players](#players)).
 - The renderer is intentionally a subset of WMP's UI vocabulary. If a skin looks
   wrong, `wmz inspect` will usually show why.
 
@@ -160,6 +185,7 @@ flowchart LR
     actions --> media[MediaController]
     media --> music[Apple Music]
     media --> spotify[Spotify]
+    media --> tidal[Tidal<br/>via MediaRemote]
     render --> view[SkinView]
     view --> actions
 ```
@@ -175,9 +201,12 @@ Sources/WMZKit/          engine
   SkinAssets.swift       images, transparency keying, sprite frames
   ActionResolver.swift   WMP commands → MediaAction
   MediaController.swift  AppleScript backends
+  SystemNowPlaying.swift MediaRemote bridge + Tidal
 Sources/WMZPlayer/       AppKit app (window, menu, input)
 Sources/wmz/             CLI
+Resources/AppIcon.icon   Icon Composer source for the app icon
 scripts/build-app.sh     .app bundle
+scripts/make-icon.swift  .icon → .icns
 ```
 
 ## Development
@@ -186,6 +215,7 @@ scripts/build-app.sh     .app bundle
 swift build                 # engine + app + CLI
 swift build -c release
 ./scripts/build-app.sh      # bundle in dist/
+swift scripts/make-icon.swift Resources/AppIcon.icon Resources/AppIcon.icns
 ```
 
 Useful probes while working on a skin:
@@ -196,9 +226,9 @@ wmz render skin.wmz --out skin.png --on 202020 --scale 2
 open skin.png
 ```
 
-The app also accepts two hidden test flags: `--click x,y` and
-`--drag x1,y1,x2,y2` (coordinates in skin pixels), which drive the same code
-path as a real mouse event.
+The app also accepts hidden test flags: `--click x,y` and `--drag x1,y1,x2,y2`
+(coordinates in skin pixels), which drive the same code path as a real mouse
+event. `WMZ_DEBUG_NP=1` logs what MediaRemote can see on your machine.
 
 ## License
 

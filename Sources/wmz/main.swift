@@ -68,6 +68,14 @@ guard let command = arguments.first, !command.hasPrefix("-") else { usage() }
 if command == "media" {
     let target = MediaController.Target(rawValue: value("--target") ?? "auto") ?? .auto
     let seconds = Double(value("--seconds") ?? "6") ?? 6
+
+    if let bundle = value("--bundle") {
+        // Debug helper: read any app through the Now Playing channel, e.g.
+        //   wmz media --bundle music
+        NowPlayingProbe.run(bundleFragment: bundle, seconds: seconds)
+        exit(0)
+    }
+
     let controller = MediaController(target: target)
     var last = ""
     controller.onChange = { state in

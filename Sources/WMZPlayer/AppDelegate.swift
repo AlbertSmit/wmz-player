@@ -28,6 +28,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             self?.view?.update(state: state)
         }
 
+        if ProcessInfo.processInfo.environment["WMZ_DEBUG_NP"] != nil {
+            NSLog("NP %@", NowPlayingProbe.diagnostics())
+        }
+
         if let raw = flagValue("--scale"), let ratio = Double(raw), ratio > 0 {
             scale = ratio > 1.5 ? 2 : 1
         }
@@ -210,6 +214,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         playerMenu.addItem(playerMenuItem("Automatic", action: #selector(useAuto(_:)), tag: 100))
         playerMenu.addItem(playerMenuItem("Apple Music", action: #selector(useMusic(_:)), tag: 101))
         playerMenu.addItem(playerMenuItem("Spotify", action: #selector(useSpotify(_:)), tag: 102))
+        playerMenu.addItem(playerMenuItem("Tidal", action: #selector(useTidal(_:)), tag: 103))
         playerItem.submenu = playerMenu
 
         let windowItem = NSMenuItem()
@@ -236,6 +241,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         case 100: menuItem.state = target == .auto ? .on : .off
         case 101: menuItem.state = target == .music ? .on : .off
         case 102: menuItem.state = target == .spotify ? .on : .off
+        case 103: menuItem.state = target == .tidal ? .on : .off
         case 110: menuItem.state = scale > 1 ? .on : .off
         case 111: menuItem.state = alwaysOnTop ? .on : .off
         case 120: menuItem.state = alwaysOnTop ? .on : .off
@@ -243,6 +249,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         case 122: menuItem.state = target == .auto ? .on : .off
         case 123: menuItem.state = target == .music ? .on : .off
         case 124: menuItem.state = target == .spotify ? .on : .off
+        case 125: menuItem.state = target == .tidal ? .on : .off
         default: break
         }
         return true
@@ -258,6 +265,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     @objc private func useAuto(_ sender: Any?) { target = .auto; media.target = .auto }
     @objc private func useMusic(_ sender: Any?) { target = .music; media.target = .music }
     @objc private func useSpotify(_ sender: Any?) { target = .spotify; media.target = .spotify }
+    @objc private func useTidal(_ sender: Any?) { target = .tidal; media.target = .tidal }
 
     @objc private func toggleScale(_ sender: Any?) {
         scale = scale > 1 ? 1 : 2
@@ -281,6 +289,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         playerMenu.addItem(playerMenuItem("Automatic", action: #selector(useAuto(_:)), tag: 122))
         playerMenu.addItem(playerMenuItem("Apple Music", action: #selector(useMusic(_:)), tag: 123))
         playerMenu.addItem(playerMenuItem("Spotify", action: #selector(useSpotify(_:)), tag: 124))
+        playerMenu.addItem(playerMenuItem("Tidal", action: #selector(useTidal(_:)), tag: 125))
         playerItem.submenu = playerMenu
         menu.addItem(playerItem)
 

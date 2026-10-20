@@ -11,6 +11,7 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
 cp ".build/$CONFIG/WMZPlayer" "$APP/Contents/MacOS/WMZPlayer"
 cp ".build/$CONFIG/wmz" "$APP/Contents/MacOS/wmz" 2>/dev/null || true
+cp Resources/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 
 cat > "$APP/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -23,6 +24,8 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
     <string>WMZPlayer</string>
     <key>CFBundleIdentifier</key>
     <string>io.github.albertsmit.wmzplayer</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>
@@ -32,7 +35,7 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.1</string>
+    <string>0.1.0</string>
     <key>CFBundleVersion</key>
     <string>1</string>
     <key>LSMinimumSystemVersion</key>

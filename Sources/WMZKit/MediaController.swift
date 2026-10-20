@@ -12,12 +12,14 @@ public final class MediaController {
         case auto
         case music
         case spotify
+        case tidal
 
         public var title: String {
             switch self {
             case .auto: return "Automatic"
             case .music: return "Apple Music"
             case .spotify: return "Spotify"
+            case .tidal: return "Tidal"
             }
         }
     }
@@ -34,6 +36,7 @@ public final class MediaController {
 
     private let music = AppleScriptPlayer(application: "Music", bundleIdentifier: "com.apple.Music", durationUnit: 1)
     private let spotify = AppleScriptPlayer(application: "Spotify", bundleIdentifier: "com.spotify.client", durationUnit: 1000)
+    private let tidal = SystemPlayer(name: "Tidal", bundleFragment: "tidal")
     private var timer: Timer?
     private var activeName = "Music"
     private var lastArtworkKey = ""
@@ -97,18 +100,24 @@ public final class MediaController {
         onChange?(state)
     }
 
-    private func activeBackend() -> AppleScriptPlayer {
+    private func activeBackend() -> PlayerBackend {
         switch target {
         case .music: return music
         case .spotify: return spotify
+        case .tidal: return tidal
         case .auto: break
         }
 
-        let spotifyRunning = spotify.isRunning
-        if spotifyRunning, spotify.isPlaying { return spotify }
+        if music.isRunning, music.isPlaying { return music }
+        if spotify.isRunning, spotify.isPlaying { return spotify }
+        if tidal.isRunning, tidal.ownership == .mine { return tidal }
         if music.isRunning { return music }
-        if spotifyRunning { return spotify }
-        return activeName == "Spotify" ? spotify : music
+        if spotify.isRunning { return spotify }
+        switch activeName {
+        case "Spotify": return spotify
+        case "Tidal": return tidal
+        default: return music
+        }
     }
 
     // MARK: - Coalesced writes
@@ -160,6 +169,9 @@ public final class MediaController {
             return
 
         case .seekFraction(let fraction):
+            // Without a duration (a player whose metadata the OS hides) a
+            // fraction has no meaning; don't jump to the start.
+            guard state.duration > 0 else { return }
             pendingSeek = max(0, fraction * state.duration)
             flushSeek()
             return
@@ -203,7 +215,7 @@ public final class MediaController {
 
 // MARK: - One application
 
-final class AppleScriptPlayer {
+final class AppleScriptPlayer: PlayerBackend {
     let application: String
     let bundleIdentifier: String
     let durationUnit: Double
