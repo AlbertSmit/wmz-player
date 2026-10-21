@@ -25,6 +25,8 @@ public final class MediaController {
     }
 
     public private(set) var state = PlayerState()
+    /// Name of the backend currently being polled ("Music", "Spotify", "Tidal").
+    public var currentBackendName: String { activeName }
     public var onChange: ((PlayerState) -> Void)?
 
     /// Set while a playlist panel is open; keeps the queue fetch out of the

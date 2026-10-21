@@ -17,6 +17,8 @@ func usage() -> Never {
                   [--out <file>] [--scale <n>] [--view <id>] [--on <hex>] [--playing] [--spectrum]
       wmz hit     <skin.wmz>        What does a click at x,y do?
                   --at <x,y> [--view <id>] [--playing]
+      wmz audio                      Print live audio bands (visualizer input)
+                  [--bundle <id>] [--seconds <n>]
       wmz queue                      Print the current Music queue window
       wmz media                     Print what the media controller sees
                   [--target music|spotify|auto] [--seconds <n>]
@@ -77,6 +79,25 @@ func dump(_ node: SceneNode, depth: Int = 0) {
 }
 
 guard let command = arguments.first, !command.hasPrefix("-") else { usage() }
+
+if command == "audio" {
+    let bundle = value("--bundle") ?? "com.apple.Music"
+    let seconds = Double(value("--seconds") ?? "3") ?? 3
+    let spectrum = AudioSpectrum(bundleIdentifier: bundle, bandCount: 8)
+    var ticks = 0
+    spectrum.onBands = { bands in
+        ticks += 1
+        guard ticks % 6 == 0 else { return }
+        print(bands.map { String(format: "%.2f", $0) }.joined(separator: " "))
+    }
+    guard spectrum.start() else {
+        print("could not start an audio tap for \(bundle)")
+        exit(1)
+    }
+    RunLoop.main.run(until: Date().addingTimeInterval(seconds))
+    spectrum.stop()
+    exit(0)
+}
 
 if command == "queue" {
     if let snapshot = PlaylistLoader.load(application: "Music", radius: 5) {

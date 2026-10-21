@@ -18,8 +18,7 @@ final class ViewWindow: NSObject, NSWindowDelegate, JavaScriptHostDelegate {
     private var scale: CGFloat
     private var jsHost: JavaScriptHost?
 
-    private let synthetic = SyntheticSpectrum(bandCount: 28)
-    private let hasEffects: Bool
+    let hasEffects: Bool
 
     var onOpenView: ((String) -> Void)?
     var onCloseView: ((String) -> Void)?
@@ -83,16 +82,6 @@ final class ViewWindow: NSObject, NSWindowDelegate, JavaScriptHostDelegate {
         return node.children.contains(where: containsEffects)
     }
 
-    /// Drives the demo visualizer; a captured spectrum will replace this.
-    func tickSpectrum(at time: TimeInterval) {
-        guard hasEffects else { return }
-        guard UserDefaults.standard.bool(forKey: "visualizerDemo") else {
-            if view.spectrum != nil { view.spectrum = nil }
-            return
-        }
-        view.spectrum = synthetic.next(at: time)
-    }
-
     func apply(_ state: PlayerState) {
         view.update(state: state)
         jsHost?.update(state)
@@ -134,6 +123,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private var alwaysOnTop = false
     private var target: MediaController.Target = .auto
     private var redrawTimer: Timer?
+    private var audioSpectrum: AudioSpectrum?
+    private var spectrumBackend: String?
+    private var latestBands: [Float]?
 
     // MARK: - Lifecycle
 
@@ -186,12 +178,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     }
 
     private func tick() {
+        updateVisualizer()
         var animated = false
         for controller in allWindows() {
             let playing = controller.view.state.isPlaying
             let animating = controller.view.renderer?.lastFrameAnimated == true
             if playing || animating { controller.view.needsDisplay = true }
-            controller.tickSpectrum(at: Date().timeIntervalSince1970)
             if controller.view.spectrum != nil {
                 controller.view.needsDisplay = true
                 animated = true
@@ -199,6 +191,55 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         }
         // A static skin only needs the once-a-second media redraw, not 15 fps.
         redrawTimer?.tolerance = animated ? 0.01 : 0.2
+    }
+
+    private func updateVisualizer() {
+        let wants = UserDefaults.standard.bool(forKey: "visualizer")
+            && allWindows().contains { $0.hasEffects }
+        guard wants else {
+            if audioSpectrum != nil {
+                audioSpectrum?.stop()
+                audioSpectrum = nil
+                spectrumBackend = nil
+                latestBands = nil
+                for controller in allWindows() { controller.view.spectrum = nil }
+            }
+            return
+        }
+
+        let backend = media.currentBackendName
+        if audioSpectrum?.isRunning != true || spectrumBackend != backend {
+            audioSpectrum?.stop()
+            audioSpectrum = nil
+            spectrumBackend = backend
+            latestBands = nil
+            if let identifier = Self.bundleIdentifier(for: backend) {
+                let spectrum = AudioSpectrum(bundleIdentifier: identifier, bandCount: 28)
+                spectrum.onBands = { [weak self] bands in self?.latestBands = bands }
+                if spectrum.start() {
+                    audioSpectrum = spectrum
+                } else {
+                    NSLog("WMZPlayer: no audio tap for %@", backend)
+                }
+            }
+        }
+
+        let bands = latestBands
+        for controller in allWindows() where controller.hasEffects {
+            controller.view.spectrum = bands.map { SpectrumFrame(bands: $0) }
+        }
+    }
+
+    private static func bundleIdentifier(for backend: String) -> String? {
+        switch backend {
+        case "Music": return "com.apple.Music"
+        case "Spotify": return "com.spotify.client"
+        case "Tidal":
+            return NSWorkspace.shared.runningApplications.first {
+                ($0.bundleIdentifier ?? "").lowercased().contains("tidal")
+            }?.bundleIdentifier
+        default: return nil
+        }
     }
 
     private func allWindows() -> [ViewWindow] {
@@ -325,24 +366,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             return
         }
         guard document.view(id: viewID) != nil, let scene = sceneCache[viewID] else { return }
-        do {
-            let controller = ViewWindow(scene: scene, viewID: viewID, isMain: false, scale: scale,
-                                        registry: elementRegistry)
-            wire(controller)
-            controller.window.level = alwaysOnTop ? .floating : .normal
+        let controller = ViewWindow(scene: scene, viewID: viewID, isMain: false, scale: scale,
+                                    registry: elementRegistry)
+        wire(controller)
+        controller.window.level = alwaysOnTop ? .floating : .normal
 
-            let base = main?.window.frame.origin ?? CGPoint(x: 120, y: 120)
-            let step = CGFloat(panels.count + 1) * 32
-            controller.window.setFrameOrigin(CGPoint(x: base.x + step, y: base.y - step))
-            controller.window.makeKeyAndOrderFront(nil)
-            panels[viewID] = controller
-            persistPanels()
-            rebuildPanelsMenu()
-            updatePlaylistNeed()
-            controller.apply(media.state)
-        } catch {
-            NSLog("WMZPlayer: could not open %@: %@", viewID, error.localizedDescription)
-        }
+        let base = main?.window.frame.origin ?? CGPoint(x: 120, y: 120)
+        let step = CGFloat(panels.count + 1) * 32
+        controller.window.setFrameOrigin(CGPoint(x: base.x + step, y: base.y - step))
+        controller.window.makeKeyAndOrderFront(nil)
+        panels[viewID] = controller
+        persistPanels()
+        rebuildPanelsMenu()
+        updatePlaylistNeed()
+        controller.apply(media.state)
     }
 
     private func closePanel(_ viewID: String) {
@@ -531,7 +568,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         let windowMenu = NSMenu(title: "Window")
         windowMenu.addItem(tagged("Double Size", #selector(toggleScale(_:)), 110))
         windowMenu.addItem(tagged("Always on Top", #selector(toggleTop(_:)), 111))
-        windowMenu.addItem(tagged("Visualizer (demo bars)", #selector(toggleVisualizer(_:)), 112))
+        windowMenu.addItem(tagged("Visualizer (audio bars)", #selector(toggleVisualizer(_:)), 112))
         windowMenu.addItem(.separator())
         windowMenu.addItem(withTitle: "Close", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
         windowItem.submenu = windowMenu
@@ -559,7 +596,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         case 103: menuItem.state = target == .tidal ? .on : .off
         case 110: menuItem.state = scale > 1 ? .on : .off
         case 111: menuItem.state = alwaysOnTop ? .on : .off
-        case 112: menuItem.state = UserDefaults.standard.bool(forKey: "visualizerDemo") ? .on : .off
+        case 112: menuItem.state = UserDefaults.standard.bool(forKey: "visualizer") ? .on : .off
         case 120: menuItem.state = alwaysOnTop ? .on : .off
         case 121: menuItem.state = scale > 1 ? .on : .off
         case 122: menuItem.state = target == .auto ? .on : .off
@@ -592,8 +629,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     }
 
     @objc private func toggleVisualizer(_ sender: Any?) {
-        let key = "visualizerDemo"
+        let key = "visualizer"
         UserDefaults.standard.set(!UserDefaults.standard.bool(forKey: key), forKey: key)
+        updateVisualizer()
         for controller in allWindows() { controller.view.needsDisplay = true }
     }
 

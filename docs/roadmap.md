@@ -86,7 +86,7 @@ logged, and must never terminate the app.
   responsive but lets the playlist panel open empty until the fetch lands.
 - **Remaining phases.** Phase 3 (visualizer) and Phase 4 (equalizer).
 
-## Phase 3 — visualizer
+## Phase 3 — visualizer (implemented)
 
 Tap the audio with `AudioHardwareCreateProcessTap` (macOS 14.2+), scoped to the
 player's process only so system audio is untouched. Run an FFT through

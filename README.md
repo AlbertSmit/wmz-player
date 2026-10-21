@@ -44,6 +44,8 @@ actually running.
   Default — lay out, animate and respond as designed.
 - **Animated GIFs and click sounds.** Multi-frame artwork animates at its own
   rate, honours play-once animations, and `theme.playSound` effects play.
+- **A real visualizer.** `<effects>` panes can show FFT bars from the player's
+  own audio, captured with a CoreAudio process tap (macOS 14.2+).
 - **The whole button map:** transport, mute, shuffle/repeat, volume, seek,
   panel open/close, file picker, URLs, close and minimize.
 - **Apple Music, Spotify and Tidal**, chosen automatically or pinned in the menu.
@@ -93,6 +95,7 @@ Without that permission those two players cannot be driven.
 | Open a panel | The skin's own button, or **Panels** in the menu |
 | Play a track | Click a row in the playlist panel |
 | Scroll the playlist | Scroll wheel over the list |
+| Visualizer | **Window → Visualizer (audio bars)** |
 | Menu | Right-click / control-click the skin |
 | Player choice | **Player → Automatic / Apple Music / Spotify / Tidal** |
 | Size and stacking | **Window → Double Size**, **Always on Top** |
@@ -128,6 +131,7 @@ wmz hit      <skin.wmz> --at 230,190 [--view <id>]
 wmz media    [--target music|spotify|tidal|auto] [--seconds <n>]
              [--bundle <fragment>]       # read any app through Now Playing
 wmz queue                                # the current Music queue window
+wmz audio [--bundle com.apple.Music]     # live FFT bands (visualizer input)
 ```
 
 `render --on <hex>` fills the background first, which is the only sane way to
@@ -161,7 +165,7 @@ The renderer supports the parts that carry the look of a skin:
 | Controls | `<button>` normal/hover/down states, `<buttongroup>` with `mappingImage` zones |
 | Sliders | `<customSlider>` sprite strips; direction fitted from the artwork |
 | Playlist | `<playlist>` columns and colours, filled from Music's queue |
-| Effects | `<effects>` hosts album art for now (our own visualizer is next) |
+| Effects | `<effects>` shows album art, or FFT bars when the visualizer is on |
 | Animation | multi-frame GIF artwork plays at the file's own frame rate |
 | Script | the view's `scriptFile` runs in JavaScriptCore against a WMP-shaped object model |
 | Text | font, size, colour, justification, `wmpprop:` bindings, title/artist/time |
@@ -216,6 +220,8 @@ Skins that build their interface from JScript at runtime — Microsoft's own
   not an endless list, and only Music exposes a queue.
 - The equalizer panel renders and reacts, but cannot process another app's audio
   without a virtual audio device in the signal path.
+- The visualizer needs macOS 14.2+ (CoreAudio process taps); on older systems
+  `<effects>` keeps showing album art.
 - Skins whose layout is produced by their JScript still render statically.
 - The renderer is intentionally a subset of WMP's UI vocabulary. If a skin looks
   wrong, `wmz inspect` will usually show why.
@@ -250,6 +256,8 @@ Sources/WMZKit/          engine
   ActionResolver.swift   WMP commands → MediaAction
   MediaController.swift  AppleScript backends
   JavaScriptHost.swift   JavaScriptCore host + WMP object model
+  AudioSpectrum.swift    CoreAudio process tap + FFT bands
+  SpectrumRenderer.swift visualizer drawing
   SystemNowPlaying.swift MediaRemote bridge + Tidal
 Sources/WMZPlayer/       AppKit app (window, menu, input)
 Sources/wmz/             CLI
