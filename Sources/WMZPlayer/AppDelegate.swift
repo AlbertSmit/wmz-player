@@ -112,6 +112,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
     private var document: SkinDocument?
     private var loadedURL: URL?
+
+    private let recentMenu = NSMenu(title: "Open Recent")
+    private static let recentKey = "recentSkins"
+    private var recentSkins: [String] = UserDefaults.standard.stringArray(forKey: "recentSkins") ?? []
     /// Scenes are built once per view so panels open instantly and every script
     /// can see every element in the skin.
     private var sceneCache: [String: Scene] = [:]
@@ -131,6 +135,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         buildMenu()
+        rebuildRecentMenu()
         media.onChange = { [weak self] state in self?.apply(state) }
 
         if let raw = flagValue("--scale"), let ratio = Double(raw), ratio > 0 {
@@ -255,6 +260,70 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
     // MARK: - Skin loading
 
+    // MARK: - Recent skins
+
+    private func noteRecentSkin(_ url: URL) {
+        let path = url.standardizedFileURL.path
+        recentSkins.removeAll { $0 == path }
+        recentSkins.insert(path, at: 0)
+        if recentSkins.count > 10 { recentSkins.removeLast(recentSkins.count - 10) }
+        UserDefaults.standard.set(recentSkins, forKey: Self.recentKey)
+        NSDocumentController.shared.noteNewRecentDocumentURL(url)
+        rebuildRecentMenu()
+    }
+
+    private func rebuildRecentMenu() {
+        recentMenu.removeAllItems()
+        let existing = recentSkins.filter { FileManager.default.fileExists(atPath: $0) }
+
+        if existing.isEmpty {
+            let empty = NSMenuItem(title: "No Recent Skins", action: nil, keyEquivalent: "")
+            empty.isEnabled = false
+            recentMenu.addItem(empty)
+            return
+        }
+
+        for path in existing {
+            let item = NSMenuItem(title: Self.displayName(for: path),
+                                  action: #selector(openRecentSkin(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = path
+            item.toolTip = path
+            recentMenu.addItem(item)
+        }
+        recentMenu.addItem(.separator())
+        let clear = NSMenuItem(title: "Clear Menu", action: #selector(clearRecentSkins(_:)), keyEquivalent: "")
+        clear.target = self
+        recentMenu.addItem(clear)
+    }
+
+    private static func displayName(for path: String) -> String {
+        let name = (path as NSString).lastPathComponent
+        return name.lowercased().hasSuffix(".wmz") ? String(name.dropLast(4)) : name
+    }
+
+    @objc private func openRecentSkin(_ sender: NSMenuItem) {
+        guard let path = sender.representedObject as? String else { return }
+        guard FileManager.default.fileExists(atPath: path) else {
+            recentSkins.removeAll { $0 == path }
+            UserDefaults.standard.set(recentSkins, forKey: Self.recentKey)
+            rebuildRecentMenu()
+            let alert = NSAlert()
+            alert.messageText = "That skin moved or was deleted"
+            alert.informativeText = path
+            alert.alertStyle = .warning
+            alert.runModal()
+            return
+        }
+        load(URL(fileURLWithPath: path), force: true)
+    }
+
+    @objc private func clearRecentSkins(_ sender: Any?) {
+        recentSkins.removeAll()
+        UserDefaults.standard.set(recentSkins, forKey: Self.recentKey)
+        rebuildRecentMenu()
+    }
+
     private func promptForSkin() {
         let panel = NSOpenPanel()
         if let type = UTType(filenameExtension: "wmz") { panel.allowedContentTypes = [type] }
@@ -279,6 +348,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             if let previous { try? FileManager.default.removeItem(at: previous) }
 
             showMain(scene: scene, viewID: primary.id)
+            noteRecentSkin(url)
             restorePanels()
             rebuildPanelsMenu()
             updatePlaylistNeed()
@@ -547,6 +617,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         mainMenu.addItem(fileItem)
         let fileMenu = NSMenu(title: "File")
         fileMenu.addItem(item("Open Skin…", #selector(openSkin(_:)), "o"))
+        let recentItem = NSMenuItem(title: "Open Recent", action: nil, keyEquivalent: "")
+        recentItem.submenu = recentMenu
+        fileMenu.addItem(recentItem)
         fileMenu.addItem(item("Reload Skin", #selector(reloadSkin(_:)), "r"))
         fileItem.submenu = fileMenu
 
@@ -650,6 +723,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private func showContextMenu(_ event: NSEvent) {
         let menu = NSMenu()
         menu.addItem(item("Open Skin…", #selector(openSkin(_:)), ""))
+
+        if !recentMenu.items.isEmpty, recentMenu.items.first?.action != nil {
+            let recentItem = NSMenuItem(title: "Open Recent", action: nil, keyEquivalent: "")
+            recentItem.submenu = recentMenu.copy() as? NSMenu
+            menu.addItem(recentItem)
+        }
 
         let playerItem = NSMenuItem(title: "Player", action: nil, keyEquivalent: "")
         let playerMenu = NSMenu()
