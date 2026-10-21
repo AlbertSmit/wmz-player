@@ -23,6 +23,7 @@ public final class JavaScriptHost: NSObject {
     public private(set) var isActive = false
 
     fileprivate let scene: Scene
+    private let registry: [String: SceneNode]
     fileprivate weak var delegate: JavaScriptHostDelegate?
     private let context = JSContext()!
     private let preferencePrefix: String
@@ -40,8 +41,10 @@ public final class JavaScriptHost: NSObject {
     private var lastTitle = ""
     private var lastSecond = -1
 
-    public init(scene: Scene, delegate: JavaScriptHostDelegate?) {
+    public init(scene: Scene, delegate: JavaScriptHostDelegate?,
+                registry: [String: SceneNode] = [:]) {
         self.scene = scene
+        self.registry = registry
         self.delegate = delegate
         let name = scene.document.sourceURL.deletingPathExtension().lastPathComponent
         self.preferencePrefix = "skin.\(name)."
@@ -214,14 +217,22 @@ public final class JavaScriptHost: NSObject {
         let bridge = Bridge(host: self)
         context.setObject(bridge, forKeyedSubscript: "__bridge" as NSString)
         // JavaScript is case sensitive: expose the ids exactly as the skin
-        // spells them, not the lowercased lookup keys.
-        let ids = scene.nodes.values.compactMap { $0.element.id.isEmpty ? nil : $0.element.id }.sorted()
-        context.setObject(ids, forKeyedSubscript: "WMZ_ELEMENT_IDS" as NSString)
+        // spells them, not the lowercased lookup keys. Every open view's
+        // elements are visible to every script, like WMP's single global scope.
+        var seen = Set<String>()
+        var ids: [String] = []
+        for node in Array(scene.nodes.values) + Array(registry.values) {
+            let id = node.element.id
+            guard !id.isEmpty, seen.insert(id.lowercased()).inserted else { continue }
+            ids.append(id)
+        }
+        context.setObject(ids.sorted(), forKeyedSubscript: "WMZ_ELEMENT_IDS" as NSString)
         context.evaluateScript(Self.prelude)
     }
 
     fileprivate func node(_ id: String) -> SceneNode? {
-        scene.nodes[id.lowercased()]
+        let key = id.lowercased()
+        return scene.nodes[key] ?? registry[key]
     }
 
     fileprivate func get(_ id: String, _ property: String) -> Any? {

@@ -24,7 +24,8 @@ final class ViewWindow: NSObject, NSWindowDelegate, JavaScriptHostDelegate {
     var onOpenDialog: (() -> Void)?
     var onPlaySound: ((String) -> Void)?
 
-    init(scene: Scene, viewID: String, isMain: Bool, scale: CGFloat) {
+    init(scene: Scene, viewID: String, isMain: Bool, scale: CGFloat,
+         registry: [String: SceneNode]) {
         self.scene = scene
         self.viewID = viewID
         self.isMain = isMain
@@ -47,11 +48,11 @@ final class ViewWindow: NSObject, NSWindowDelegate, JavaScriptHostDelegate {
         window.title = scene.title
         super.init()
         window.delegate = self
-        startScript()
+        startScript(registry: registry)
     }
 
-    private func startScript() {
-        let host = JavaScriptHost(scene: scene, delegate: self)
+    private func startScript(registry: [String: SceneNode]) {
+        let host = JavaScriptHost(scene: scene, delegate: self, registry: registry)
         jsHost = host
         host.start()
 
@@ -103,6 +104,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
     private var document: SkinDocument?
     private var loadedURL: URL?
+    /// Scenes are built once per view so panels open instantly and every script
+    /// can see every element in the skin.
+    private var sceneCache: [String: Scene] = [:]
+    private var elementRegistry: [String: SceneNode] = [:]
     private var main: ViewWindow?
     private var panels: [String: ViewWindow] = [:]
     private var panelsMenu = NSMenu(title: "Panels")
@@ -201,7 +206,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             closeAll()
             let document = try SkinLoader.load(url)
             guard let primary = document.primaryView else { throw SkinError.noViews }
-            let scene = try SceneBuilder.build(document: document, view: primary)
+            buildScenes(for: document)
+            guard let scene = sceneCache[primary.id] else { throw SkinError.noViews }
             let previous = self.document?.rootURL
             self.document = document
             self.loadedURL = url
@@ -221,8 +227,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         }
     }
 
+    /// Builds every readable view in one pass: it feeds the shared element
+    /// registry and removes per-panel layout work.
+    private func buildScenes(for document: SkinDocument) {
+        sceneCache = [:]
+        elementRegistry = [:]
+        for view in document.views {
+            let id = view.id
+            let lowered = id.lowercased()
+            guard !id.isEmpty else { continue }
+            if lowered.contains("preview") || lowered.contains("upgrade") || lowered.contains("control") {
+                continue
+            }
+            guard let scene = try? SceneBuilder.build(document: document, view: view) else { continue }
+            sceneCache[id] = scene
+            for (key, node) in scene.nodes where elementRegistry[key] == nil {
+                elementRegistry[key] = node
+            }
+        }
+    }
+
     private func showMain(scene: Scene, viewID: String) {
-        let controller = ViewWindow(scene: scene, viewID: viewID, isMain: true, scale: scale)
+        let controller = ViewWindow(scene: scene, viewID: viewID, isMain: true, scale: scale,
+                                    registry: elementRegistry)
         wire(controller)
         main = controller
         controller.window.level = alwaysOnTop ? .floating : .normal
@@ -274,10 +301,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             existing.window.makeKeyAndOrderFront(nil)
             return
         }
-        guard let view = document.view(id: viewID) else { return }
+        guard document.view(id: viewID) != nil, let scene = sceneCache[viewID] else { return }
         do {
-            let scene = try SceneBuilder.build(document: document, view: view)
-            let controller = ViewWindow(scene: scene, viewID: viewID, isMain: false, scale: scale)
+            let controller = ViewWindow(scene: scene, viewID: viewID, isMain: false, scale: scale,
+                                        registry: elementRegistry)
             wire(controller)
             controller.window.level = alwaysOnTop ? .floating : .normal
 
