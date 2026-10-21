@@ -20,6 +20,11 @@ final class ViewWindow: NSObject, NSWindowDelegate, JavaScriptHostDelegate {
 
     let hasEffects: Bool
 
+    var visualizerStyle: Int = 0 {
+        didSet { view.visualizerStyle = visualizerStyle }
+    }
+    var onEffectChanged: ((Int) -> Void)?
+
     var onOpenView: ((String) -> Void)?
     var onCloseView: ((String) -> Void)?
     var onReturnToMain: (() -> Void)?
@@ -57,6 +62,10 @@ final class ViewWindow: NSObject, NSWindowDelegate, JavaScriptHostDelegate {
     private func startScript(registry: [String: SceneNode]) {
         let host = JavaScriptHost(scene: scene, delegate: self, registry: registry)
         jsHost = host
+        host.onEffectChanged = { [weak self] index in
+            self?.visualizerStyle = index
+            self?.onEffectChanged?(index)
+        }
         host.start()
 
         view.onScriptClick = { [weak self] node, action in
@@ -130,6 +139,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private var audioSpectrum: AudioSpectrum?
     private var spectrumBackend: String?
     private var latestBands: [Float]?
+    private var visualizerStyle = 0
 
     // MARK: - Lifecycle
 
@@ -165,12 +175,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         }
         if let click = simulatedPanelClick() {
             DispatchQueue.main.asyncAfter(deadline: .now() + 4.2) { [weak self] in
+                if ProcessInfo.processInfo.environment["WMZ_DEBUG_JS"] != nil {
+                    NSLog("panel-click panels=%d", self?.panels.count ?? -1)
+                }
                 self?.panels.values.first?.view.simulateClick(at: click)
             }
         }
         if let panel = flagValue("--panel") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
                 self?.openPanelView(panel)
+            }
+        }
+        if let raw = flagValue("--scroll"), let rows = Int(raw) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 4.0) { [weak self] in
+                self?.media.scrollPlaylist(by: rows)
             }
         }
     }
@@ -399,6 +417,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         controller.view.onContextMenu = { [weak self] event in self?.showContextMenu(event) }
         controller.view.onSound = { [weak self] name in self?.playSound(name, from: viewID) }
         controller.view.onPlaylistScroll = { [weak self] rows in self?.media.scrollPlaylist(by: rows) }
+        controller.visualizerStyle = visualizerStyle
+        controller.onEffectChanged = { [weak self] index in
+            guard let self else { return }
+            if ProcessInfo.processInfo.environment["WMZ_DEBUG_JS"] != nil {
+                NSLog("effect style -> %d", index)
+            }
+            self.visualizerStyle = index
+            for controller in self.allWindows() { controller.visualizerStyle = index }
+        }
         controller.onOpenView = { [weak self] id in self?.openPanelView(id) }
         controller.onCloseView = { [weak self, weak controller] id in
             guard let self, let controller else { return }

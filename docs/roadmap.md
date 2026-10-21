@@ -74,6 +74,11 @@ logged, and must never terminate the app.
 
 ### Phase 2 status
 
+Phase 2 gaps are closed: shared element registry, 2 s script execution cap,
+paged playlist windows, API stubs for `theme.loadString` and the visualizer
+effect properties, and a 46-case test suite (`swift test`). The visualizer's
+prev/next buttons cycle three bar styles.
+
 - **Script host implemented.** JavaScriptCore runs the skin's own scripts, so
   timers, `moveTo` and `alphaBlendTo` animate the skin instead of being read
   and discarded.

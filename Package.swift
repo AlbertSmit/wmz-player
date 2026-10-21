@@ -12,5 +12,6 @@ let package = Package(
         .target(name: "WMZKit", swiftSettings: [.swiftLanguageMode(.v5)]),
         .executableTarget(name: "wmz", dependencies: ["WMZKit"], swiftSettings: [.swiftLanguageMode(.v5)]),
         .executableTarget(name: "WMZPlayer", dependencies: ["WMZKit"], swiftSettings: [.swiftLanguageMode(.v5)]),
+        .testTarget(name: "WMZKitTests", dependencies: ["WMZKit"]),
     ]
 )

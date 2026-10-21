@@ -50,6 +50,10 @@ public struct PlaylistSnapshot {
 
 /// Reads the Music queue and exposes the transport bits the skin needs.
 ///
+/// Windows are centred on the playing track by default; `center` pages the same
+/// query to any absolute index, which is how the list streams in as the user
+/// scrolls away from the current row.
+///
 /// Every entry point must be called on the main thread: `NSAppleScript` pumps
 /// the calling thread's run loop while it waits for Music, and scripts that
 /// resolve object references (`current playlist`, `current track`) deadlock
@@ -57,10 +61,21 @@ public struct PlaylistSnapshot {
 /// the query to `osascript`, which has a main thread of its own.
 public enum PlaylistLoader {
 
-    /// Rows around the current track. Returns nil when nothing is playing or
-    /// the app has no accessible playlist (Spotify/Tidal are not supported).
-    public static func load(application: String, radius: Int) -> PlaylistSnapshot? {
+    /// A window of `radius` rows either side of `center`.
+    ///
+    /// `center` is an absolute, 1-based playlist index. Passing nil anchors the
+    /// window on the playing track, which is what the initial load wants; paging
+    /// passes the index the user scrolled to, so the same query can fetch any
+    /// slice of the queue. The centre is clamped to `1...total` inside the
+    /// script; `rows` and `startIndex` stay absolute playlist positions either
+    /// way, and `PlaylistSnapshot.currentIndex` still reports the *playing*
+    /// track so the renderer can keep highlighting it.
+    ///
+    /// Returns nil when nothing is playing or the app has no accessible playlist
+    /// (Spotify/Tidal are not supported).
+    public static func load(application: String, radius: Int, center: Int? = nil) -> PlaylistSnapshot? {
         let radius = max(0, radius)
+        let anchorSource = anchorExpression(center)
         // A list, never a delimited string: a U+001F separator was seen hanging
         // the Apple event round-trip on macOS 26.
         let script = """
@@ -76,9 +91,12 @@ public enum PlaylistLoader {
                 set idx to (index of current track)
             end try
             if n is 0 or idx < 1 then return {}
-            set firstIndex to idx - \(radius)
+            set anchor to \(anchorSource)
+            if anchor < 1 then set anchor to 1
+            if anchor > n then set anchor to n
+            set firstIndex to anchor - \(radius)
             if firstIndex < 1 then set firstIndex to 1
-            set lastIndex to idx + \(radius)
+            set lastIndex to anchor + \(radius)
             if lastIndex > n then set lastIndex to n
             set out to {n, idx, (name of p)}
             repeat with i from firstIndex to lastIndex
@@ -105,7 +123,10 @@ public enum PlaylistLoader {
         let current = integer(result.atIndex(2))
         guard total > 0, current >= 1 else { return nil }
 
-        let startIndex = max(1, current - radius)
+        // The script clamps the centre to the playlist; mirror it here so the
+        // row numbers line up with the rows it collected.
+        let anchor = min(max(center ?? current, 1), total)
+        let startIndex = max(1, anchor - radius)
         let rowCount = (result.numberOfItems - 3) / 4
         guard rowCount > 0 else { return nil }
 
@@ -132,17 +153,19 @@ public enum PlaylistLoader {
     }
 
     /// Same query as `load`, but runs `osascript` on a background queue and
-    /// calls back on the main queue. Never blocks the caller.
+    /// calls back on the main queue. Never blocks the caller. `center` works as
+    /// it does in `load`, so a page far from the playing track costs the same
+    /// as the initial window.
     ///
     /// Multi-step scripts cannot run off the main thread here, so a subprocess
     /// is the only way to keep a 35k-track library from stalling the UI.
-    public static func loadAsync(application: String, radius: Int,
+    public static func loadAsync(application: String, radius: Int, center: Int? = nil,
                                  completion: @escaping (PlaylistSnapshot?) -> Void) {
         let radius = max(0, radius)
-        let script = textScript(application: application, radius: radius)
+        let script = textScript(application: application, radius: radius, center: center)
         DispatchQueue.global(qos: .utility).async {
             let output = runOSAScript(script)
-            let snapshot = output.flatMap { parseText($0, radius: radius) }
+            let snapshot = output.flatMap { parseText($0, radius: radius, center: center) }
             DispatchQueue.main.async { completion(snapshot) }
         }
     }
@@ -208,6 +231,12 @@ public enum PlaylistLoader {
 
     // MARK: - Plumbing
 
+    /// What the script should centre the window on: the given absolute index,
+    /// or `idx` (the playing track) when the caller did not ask for a page.
+    private static func anchorExpression(_ center: Int?) -> String {
+        center.map(String.init) ?? "idx"
+    }
+
     /// The same query as `load`, but returning one tab-separated line per row:
     /// `osascript` prints a returned string verbatim, while a list would come
     /// back as a human-readable dump. `tab` and `linefeed` are AppleScript
@@ -215,8 +244,9 @@ public enum PlaylistLoader {
     ///
     /// The `is running` test does not launch the app, and a `tell` block would,
     /// so a background poll must not skip it.
-    private static func textScript(application: String, radius: Int) -> String {
-        """
+    private static func textScript(application: String, radius: Int, center: Int?) -> String {
+        let anchorSource = anchorExpression(center)
+        return """
         if application \(quoted(application)) is not running then return ""
         tell application \(quoted(application))
             try
@@ -230,9 +260,12 @@ public enum PlaylistLoader {
                 set idx to (index of current track)
             end try
             if n is 0 or idx < 1 then return ""
-            set firstIndex to idx - \(radius)
+            set anchor to \(anchorSource)
+            if anchor < 1 then set anchor to 1
+            if anchor > n then set anchor to n
+            set firstIndex to anchor - \(radius)
             if firstIndex < 1 then set firstIndex to 1
-            set lastIndex to idx + \(radius)
+            set lastIndex to anchor + \(radius)
             if lastIndex > n then set lastIndex to n
             set out to ((n as string) & tab & (idx as string) & tab & (name of p) & linefeed)
             repeat with i from firstIndex to lastIndex
@@ -306,7 +339,7 @@ public enum PlaylistLoader {
 
     /// Mirrors the descriptor walk in `load`. A row that does not parse still
     /// consumes an index, so the numbers stay aligned with the playlist.
-    private static func parseText(_ output: String, radius: Int) -> PlaylistSnapshot? {
+    private static func parseText(_ output: String, radius: Int, center: Int?) -> PlaylistSnapshot? {
         let lines = output.split(separator: "\n", omittingEmptySubsequences: true)
         guard let header = lines.first else { return nil }
         let fields = header.split(separator: "\t", omittingEmptySubsequences: false)
@@ -316,7 +349,9 @@ public enum PlaylistLoader {
               total > 0, current >= 1
         else { return nil }
 
-        let startIndex = max(1, current - radius)
+        // Same clamp as the script, so the row numbers match what it collected.
+        let anchor = min(max(center ?? current, 1), total)
+        let startIndex = max(1, anchor - radius)
         var rows: [PlaylistRow] = []
         rows.reserveCapacity(lines.count)
         for (offset, line) in lines.dropFirst().enumerated() {

@@ -61,6 +61,7 @@ public final class MediaController {
     private var lastPlaylistFetch = Date.distantPast
     private var lastPlaylistKey = ""
     private var playlistLoading = false
+    private var playlistCenter: Int?
 
     public init(target: Target = .auto) {
         self.target = target
@@ -138,8 +139,52 @@ public final class MediaController {
     public func scrollPlaylist(by rows: Int) {
         guard !state.playlistRows.isEmpty else { return }
         let maximum = max(0, state.playlistRows.count - 1)
-        state.playlistOffset = min(max(0, state.playlistOffset + rows), maximum)
+        let offset = min(max(0, state.playlistOffset + rows), maximum)
+        state.playlistOffset = offset
+        if ProcessInfo.processInfo.environment["WMZ_DEBUG_PLAYLIST"] != nil {
+            NSLog("playlist scroll rows=%d offset=%d max=%d", rows, offset, maximum)
+        }
         onChange?(state)
+
+        // Page in more rows before the user reaches the end of the window.
+        let nearTop = offset <= 2
+        let nearBottom = offset >= maximum - 2
+        if nearTop || nearBottom {
+            pagePlaylist(around: state.playlistStart + offset + 6)
+        }
+    }
+
+    private func pagePlaylist(around index: Int) {
+        if ProcessInfo.processInfo.environment["WMZ_DEBUG_PLAYLIST"] != nil {
+            NSLog("pagePlaylist around=%d loading=%d needs=%d", index, playlistLoading ? 1 : 0, needsPlaylist ? 1 : 0)
+        }
+        guard !playlistLoading, needsPlaylist else { return }
+        playlistLoading = true
+        playlistCenter = index
+        PlaylistLoader.loadAsync(application: "Music", radius: 20, center: index) { [weak self] snapshot in
+            guard let self else { return }
+            self.playlistLoading = false
+            guard let snapshot else {
+                if ProcessInfo.processInfo.environment["WMZ_DEBUG_PLAYLIST"] != nil {
+                    NSLog("pagePlaylist: no snapshot")
+                }
+                return
+            }
+            self.state.playlistName = snapshot.name
+            self.state.playlistRows = snapshot.rows
+            self.state.playlistTotal = snapshot.total
+            self.state.playlistCurrent = snapshot.currentIndex
+            self.state.playlistStart = snapshot.startIndex
+            // Keep roughly the same absolute row under the cursor.
+            self.state.playlistOffset = min(max(0, index - snapshot.startIndex - 6),
+                                            max(0, snapshot.rows.count - 1))
+            if ProcessInfo.processInfo.environment["WMZ_DEBUG_PLAYLIST"] != nil {
+                NSLog("playlist paged around %d: rows %d…%d offset %d",
+                      index, snapshot.startIndex, snapshot.startIndex + snapshot.rows.count - 1,
+                      self.state.playlistOffset)
+            }
+            self.onChange?(self.state)
+        }
     }
 
     public func openFile(_ url: URL) {
@@ -192,13 +237,15 @@ public final class MediaController {
         }
 
         let key = "\(state.title)|\(state.artist)"
+        let trackChanged = key != lastPlaylistKey
         let stale = Date().timeIntervalSince(lastPlaylistFetch) > 20
-        guard !playlistLoading, key != lastPlaylistKey || stale else { return }
+        guard !playlistLoading, trackChanged || stale else { return }
         lastPlaylistKey = key
         lastPlaylistFetch = Date()
+        if trackChanged { playlistCenter = nil }
         playlistLoading = true
 
-        PlaylistLoader.loadAsync(application: "Music", radius: 12) { [weak self] snapshot in
+        PlaylistLoader.loadAsync(application: "Music", radius: 12, center: playlistCenter) { [weak self] snapshot in
             guard let self else { return }
             self.playlistLoading = false
             guard let snapshot else {

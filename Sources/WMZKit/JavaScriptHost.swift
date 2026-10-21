@@ -1,6 +1,17 @@
 import Foundation
 import JavaScriptCore
 
+@_silgen_name("JSContextGetGroup")
+private func WMZContextGroup(_ context: JSGlobalContextRef!) -> JSContextGroupRef!
+
+@_silgen_name("JSContextGroupSetExecutionTimeLimit")
+private func WMZSetExecutionTimeLimit(
+    _ group: JSContextGroupRef!,
+    _ limit: Double,
+    _ callback: (@convention(c) (JSContextRef?, UnsafeMutableRawPointer?) -> Bool)?,
+    _ context: UnsafeMutableRawPointer?
+)
+
 
 /// What the skin's script is allowed to ask the app to do.
 public protocol JavaScriptHostDelegate: AnyObject {
@@ -21,6 +32,8 @@ public protocol JavaScriptHostDelegate: AnyObject {
 /// animation, navigation and transport to work.
 public final class JavaScriptHost: NSObject {
     public private(set) var isActive = false
+    /// Called when the skin's visualizer buttons cycle styles.
+    public var onEffectChanged: ((Int) -> Void)?
 
     fileprivate let scene: Scene
     private let registry: [String: SceneNode]
@@ -36,6 +49,8 @@ public final class JavaScriptHost: NSObject {
     fileprivate var onTimerScript: String?
     private var reportedErrors = Set<String>()
     private var didActDuringCall = false
+    private var effectIndex = 0
+    private let effectTitles = ["Bars", "Mirror", "Fine"]
 
     private var lastPlayState = ""
     private var lastTitle = ""
@@ -49,6 +64,8 @@ public final class JavaScriptHost: NSObject {
         let name = scene.document.sourceURL.deletingPathExtension().lastPathComponent
         self.preferencePrefix = "skin.\(name)."
         super.init()
+        // A broken skin must not wedge the app: cap any single evaluation.
+        WMZSetExecutionTimeLimit(WMZContextGroup(context.jsGlobalContextRef), 2.0, nil, nil)
         context.exceptionHandler = { [weak self] _, exception in
             self?.report(exception)
         }
@@ -106,6 +123,9 @@ public final class JavaScriptHost: NSObject {
     @discardableResult
     public func call(_ script: String) -> Bool {
         guard isActive else { return false }
+        if ProcessInfo.processInfo.environment["WMZ_DEBUG_JS"] != nil {
+            NSLog("JS %@ call: %@", scene.view.id, script)
+        }
         didActDuringCall = false
         var source = script.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !source.isEmpty else { return false }
@@ -261,6 +281,12 @@ public final class JavaScriptHost: NSObject {
         case "enabled": return node.enabledOverride ?? (node.element["enabled"]?.lowercased() != "false")
         case "tooltip", "uptooltip":
             return node.element["tooltip"] ?? node.element["uptooltip"] ?? ""
+        case "currenteffecttitle":
+            return node.kind == .effects ? effectTitles[effectIndex] : ""
+        case "currentpresettitle":
+            return node.kind == .effects ? "Default" : ""
+        case "currenteffecttype", "currentpreset":
+            return ""
         default: return nil
         }
     }
@@ -336,6 +362,17 @@ public final class JavaScriptHost: NSObject {
         didActDuringCall = true
     }
 
+    /// The effects element's next/previous buttons cycle our visualizer styles.
+    fileprivate func effectStep(_ id: String, _ delta: Int) {
+        if ProcessInfo.processInfo.environment["WMZ_DEBUG_JS"] != nil {
+            NSLog("effectStep id=%@ delta=%d kind=%@ delegate=%@", id, delta,
+                  String(describing: node(id)?.kind), delegate == nil ? "nil" : "ok")
+        }
+        guard node(id)?.kind == .effects else { return }
+        effectIndex = (effectIndex + delta + effectTitles.count) % effectTitles.count
+        onEffectChanged?(effectIndex)
+    }
+
     fileprivate func setTimerInterval(_ milliseconds: Double) {
         timerInterval = milliseconds
         restartTimer()
@@ -402,6 +439,8 @@ public final class JavaScriptHost: NSObject {
         o.moveTo = function(x, y, ms) { __bridge.moveTo(id, x, y, ms || 0); };
         o.moveto = o.moveTo;
         o.size = function() {};
+        o.next = function() { __bridge.effectStep(id, 1); };
+        o.previous = function() { __bridge.effectStep(id, -1); };
         // Elements expose APIs we do not model (playlist column resizing,
         // effect stepping, …). Stubbing them keeps a skin's script alive.
         ['setColumnResizeMode','setColumns','setColumnWidth','setSortColumn','sort',
@@ -463,6 +502,7 @@ public final class JavaScriptHost: NSObject {
         closeView: function(id) { __bridge.closeView(id); },
         playSound: function(name) { __bridge.playSound(name); },
         openDialog: function(kind) { __bridge.openDialog(); },
+        loadString: function(key) { return ''; },
         get currentViewID() { return __bridge.currentView(); },
         set currentViewID(v) { }
     };
@@ -501,6 +541,7 @@ public final class JavaScriptHost: NSObject {
     theme.closeview = theme.closeView;
     theme.playsound = theme.playSound;
     theme.opendialog = theme.openDialog;
+    theme.loadstring = theme.loadString;
 
     Object.defineProperty(view, 'timerinterval', {
         get: function() { return __bridge.timerInterval(); },
@@ -537,6 +578,11 @@ public final class JavaScriptHost: NSObject {
         get: function() { return __bridge.state('openState'); }
     });
 
+    // WMP defines a few globals skins expect; keep them defined so a missing
+    // value does not abort a whole handler.
+    var strSourceURL = '';
+    var strMediaURL = '';
+
     var event = { keyCode: 0, shiftKey: false, ctrlKey: false, altKey: false };
     """#
 }
@@ -560,6 +606,7 @@ public final class JavaScriptHost: NSObject {
     func returnToMain()
     func openDialog()
     func playSound(_ name: String)
+    func effectStep(_ id: String, _ delta: Int)
     func savePref(_ key: String, _ value: String)
     func loadPref(_ key: String) -> String?
     func currentView() -> String
@@ -659,6 +706,7 @@ final class Bridge: NSObject, JavaScriptBridgeExports {
     func closeView(_ id: String) { host?.noteAction(); host?.delegate?.jsCloseView(id) }
     func returnToMain() { host?.delegate?.jsReturnToMediaCenter() }
     func openDialog() { host?.noteAction(); host?.delegate?.jsOpenDialog() }
+    func effectStep(_ id: String, _ delta: Int) { host?.effectStep(id, delta) }
     func playSound(_ name: String) { host?.noteAction(); host?.delegate?.jsPlaySound(name) }
     func savePref(_ key: String, _ value: String) { host?.savePreference(key, value) }
     func loadPref(_ key: String) -> String? { host?.preference(key) }

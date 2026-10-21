@@ -2,9 +2,14 @@ import AppKit
 import WMZKit
 
 final class SkinView: NSView {
+    var visualizerStyle: Int = 0 {
+        didSet { renderer?.visualizerStyle = visualizerStyle }
+    }
+
     var scene: Scene? {
         didSet {
             renderer = scene.map(SceneRenderer.init(scene:))
+            renderer?.visualizerStyle = visualizerStyle
             hovered = nil
             pressed = nil
             needsDisplay = true
@@ -231,7 +236,14 @@ final class SkinView: NSView {
     /// Test hook: drives the same code path as a real click, without the OS
     /// event queue (used by `--click x,y`).
     func simulateClick(at point: CGPoint) {
+        if ProcessInfo.processInfo.environment["WMZ_DEBUG_JS"] != nil {
+            NSLog("simulateClick entered window=%@", window == nil ? "nil" : "ok")
+        }
         guard let window else { return }
+        if ProcessInfo.processInfo.environment["WMZ_DEBUG_JS"] != nil {
+            NSLog("simulate %@ hit=%@", NSStringFromPoint(point),
+                  String(describing: scene?.hitTest(point, state: state)))
+        }
         let windowPoint = convert(point, to: nil)
         for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
             guard let event = NSEvent.mouseEvent(

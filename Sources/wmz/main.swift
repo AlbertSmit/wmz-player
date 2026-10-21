@@ -20,6 +20,7 @@ func usage() -> Never {
       wmz audio                      Print live audio bands (visualizer input)
                   [--bundle <id>] [--seconds <n>]
       wmz queue                      Print the current Music queue window
+                  [--center <index>]
       wmz media                     Print what the media controller sees
                   [--target music|spotify|auto] [--seconds <n>]
 
@@ -100,7 +101,8 @@ if command == "audio" {
 }
 
 if command == "queue" {
-    if let snapshot = PlaylistLoader.load(application: "Music", radius: 5) {
+    let center = value("--center").flatMap { Int($0) }
+    if let snapshot = PlaylistLoader.load(application: "Music", radius: 5, center: center) {
         print("playlist:", snapshot.name, "total:", snapshot.total, "current:", snapshot.currentIndex, "start:", snapshot.startIndex)
         for row in snapshot.rows {
             print(row.index, "|", row.title, "|", row.artist, "|", row.album, "|", Int(row.duration))

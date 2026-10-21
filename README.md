@@ -44,8 +44,9 @@ actually running.
   Default — lay out, animate and respond as designed.
 - **Animated GIFs and click sounds.** Multi-frame artwork animates at its own
   rate, honours play-once animations, and `theme.playSound` effects play.
-- **A real visualizer.** `<effects>` panes can show FFT bars from the player's
-  own audio, captured with a CoreAudio process tap (macOS 14.2+).
+- **A real visualizer.** `<effects>` panes show FFT bars from the player's own
+  audio (CoreAudio process tap, macOS 14.2+); the skin's effect buttons cycle
+  three styles, and the effect name label updates with them.
 - **The whole button map:** transport, mute, shuffle/repeat, volume, seek,
   panel open/close, file picker, URLs, close and minimize.
 - **Apple Music, Spotify and Tidal**, chosen automatically or pinned in the menu.
@@ -132,6 +133,7 @@ wmz media    [--target music|spotify|tidal|auto] [--seconds <n>]
              [--bundle <fragment>]       # read any app through Now Playing
 wmz queue                                # the current Music queue window
 wmz audio [--bundle com.apple.Music]     # live FFT bands (visualizer input)
+wmz queue --center <index>               # page around an arbitrary row
 ```
 
 `render --on <hex>` fills the background first, which is the only sane way to
@@ -189,7 +191,8 @@ APIs are matched case-insensitively because skins are inconsistent about it.
 
 Element properties set by the script override the XML: visibility is evaluated
 at draw time, artwork and text can be swapped per frame, and moves carry their
-subtree with them.
+subtree with them. A 2-second execution cap keeps a broken skin from wedging the
+main thread.
 
 AppleScript drives Music and Spotify. Writes to the player (seek, volume) are
 coalesced: Music can apply overlapping `set` events out of order and drop the
@@ -214,10 +217,10 @@ Skins that build their interface from JScript at runtime — Microsoft's own
   still differ.
 - Each view runs its own context, so globals are not shared between the main
   window and its panels.
-- There is no execution-time cap on a skin's script yet.
+- The playlist pages in another window of rows when you scroll near an edge;
+  it is not an endless virtual list.
 - Tidal's metadata and seeking depend on the macOS build (see [Players](#players)).
-- The playlist panel loads the dozen or so rows around the current track; it is
-  not an endless list, and only Music exposes a queue.
+- Only Music exposes a queue; Spotify and Tidal show the now-playing row.
 - The equalizer panel renders and reacts, but cannot process another app's audio
   without a virtual audio device in the signal path.
 - The visualizer needs macOS 14.2+ (CoreAudio process taps); on older systems
@@ -270,6 +273,7 @@ scripts/make-icon.swift  .icon → .icns
 
 ```sh
 swift build                 # engine + app + CLI
+swift test                  # layout, XML, action and hit-testing tests
 swift build -c release
 ./scripts/build-app.sh      # bundle in dist/
 swift scripts/make-icon.swift Resources/AppIcon.icon Resources/AppIcon.icns

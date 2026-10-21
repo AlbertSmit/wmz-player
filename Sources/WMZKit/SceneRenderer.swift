@@ -18,7 +18,29 @@ public final class SceneRenderer {
             if spectrum == nil { spectrumRenderer.reset() }
         }
     }
-    private let spectrumRenderer = SpectrumRenderer()
+    /// 0 = bars, 1 = mirror, 2 = fine; cycled by the skin's effects buttons.
+    public var visualizerStyle: Int = 0 {
+        didSet { spectrumRenderer = Self.makeSpectrumRenderer(visualizerStyle) }
+    }
+    private var spectrumRenderer = SceneRenderer.makeSpectrumRenderer(0)
+
+    private static func makeSpectrumRenderer(_ style: Int) -> SpectrumRenderer {
+        var spectrumStyle = SpectrumStyle()
+        switch style {
+        case 1:
+            spectrumStyle.showsReflection = true
+            spectrumStyle.barGap = 4
+            spectrumStyle.reflectionAlpha = 0.32
+        case 2:
+            spectrumStyle.showsReflection = false
+            spectrumStyle.barGap = 1
+            spectrumStyle.cornerRadius = 0.5
+        default:
+            spectrumStyle.showsReflection = false
+            spectrumStyle.barGap = 2
+        }
+        return SpectrumRenderer(style: spectrumStyle)
+    }
 
     public init(scene: Scene) {
         self.scene = scene
