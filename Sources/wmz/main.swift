@@ -12,10 +12,12 @@ func usage() -> Never {
     wmz — Windows Media Player skin toolkit
 
       wmz inspect <skin.wmz>        List views and controls
+                  [--view <id>]
       wmz render  <skin.wmz>        Render a PNG preview
                   [--out <file>] [--scale <n>] [--view <id>] [--on <hex>] [--playing]
       wmz hit     <skin.wmz>        What does a click at x,y do?
-                  --at <x,y> [--playing]
+                  --at <x,y> [--view <id>] [--playing]
+      wmz queue                      Print the current Music queue window
       wmz media                     Print what the media controller sees
                   [--target music|spotify|auto] [--seconds <n>]
 
@@ -39,6 +41,16 @@ func previewState(playing: Bool) -> PlayerState {
     state.position = 87
     state.volume = 68
     state.backendName = "Preview"
+    if ProcessInfo.processInfo.arguments.contains("--playlist") {
+        state.playlistName = "Preview Queue"
+        state.playlistRows = (1...10).map {
+            PlaylistRow(index: $0, title: "Track \($0)", artist: "Artist \($0)",
+                        album: "Album", duration: Double(150 + $0 * 7))
+        }
+        state.playlistTotal = 10
+        state.playlistCurrent = 3
+        state.playlistStart = 1
+    }
     return state
 }
 
@@ -47,8 +59,8 @@ func dump(_ node: SceneNode, depth: Int = 0) {
     var description = "\(indent)\(node.element.name)"
     if !node.id.isEmpty { description += " #\(node.id)" }
     let frame = node.frame
-    description += String(format: "  [%.0f, %.0f  %.0fx%.0f]",
-                          frame.minX, frame.minY, frame.width, frame.height)
+    description += String(format: "  [%.0f, %.0f  %.0fx%.0f] z=%d",
+                          frame.minX, frame.minY, frame.width, frame.height, node.zIndex)
     if let image = node.element["backgroundimage"] { description += "  bg=\(image)" }
     if let image = node.element["image"] { description += "  img=\(image)" }
     if node.element["transparencycolor"] != nil || node.element["clippingcolor"] != nil {
@@ -64,6 +76,18 @@ func dump(_ node: SceneNode, depth: Int = 0) {
 }
 
 guard let command = arguments.first, !command.hasPrefix("-") else { usage() }
+
+if command == "queue" {
+    if let snapshot = PlaylistLoader.load(application: "Music", radius: 5) {
+        print("playlist:", snapshot.name, "total:", snapshot.total, "current:", snapshot.currentIndex, "start:", snapshot.startIndex)
+        for row in snapshot.rows {
+            print(row.index, "|", row.title, "|", row.artist, "|", row.album, "|", Int(row.duration))
+        }
+    } else {
+        print("no queue (nothing playing, or the current source has no playlist)")
+    }
+    exit(0)
+}
 
 if command == "media" {
     let target = MediaController.Target(rawValue: value("--target") ?? "auto") ?? .auto
@@ -106,7 +130,8 @@ do {
             print("\(mark) \(view.id.isEmpty ? "(untitled)" : view.id)  \(width)x\(height)")
         }
         print("")
-        let scene = try SceneBuilder.build(document: document)
+        let view = value("--view").flatMap { document.view(id: $0) }
+        let scene = try SceneBuilder.build(document: document, view: view)
         dump(scene.root)
 
     case "render":
@@ -136,13 +161,16 @@ do {
             FileHandle.standardError.write(Data("Expected --at x,y\n".utf8))
             exit(1)
         }
-        let scene = try SceneBuilder.build(document: document)
+        let view = value("--view").flatMap { document.view(id: $0) }
+        let scene = try SceneBuilder.build(document: document, view: view)
         let state = previewState(playing: arguments.contains("--playing"))
         switch scene.hitTest(CGPoint(x: x, y: y), state: state) {
         case .action(let action, let node):
             print("action \(action) on \(node.element.name) \(node.id.isEmpty ? "" : "#\(node.id)")")
         case .slider(let slider, let fraction, let node):
             print("slider \(slider.target) = \(Int(fraction * 100))% on \(node.id)")
+        case .playlistRow(let index, _):
+            print("playlist row \(index)")
         case .background:
             print("background")
         }

@@ -13,14 +13,97 @@ enum ActionResolver {
         default: break
         }
 
-        if let script = element["onclick"]?.lowercased(), let action = scan(script) {
-            return action
-        }
+        let original = element["onclick"] ?? ""
+        let script = original.lowercased()
+        if let action = panelAction(script, original: original) { return action }
+        if let action = scan(script) { return action }
 
         let words = [element["id"], element["image"]]
             .compactMap { $0?.lowercased() }
             .joined(separator: " ")
         return keywordAction(words)
+    }
+
+    /// Navigation and shell actions, which are written as script fragments but
+    /// map cleanly onto the app: open/close a panel view, open a file or URL,
+    /// shuffle/repeat, return to the main window.
+    private static func panelAction(_ script: String, original: String) -> MediaAction? {
+        if script.contains("exitview") || script.contains("theme.close") { return .closeWindow }
+        if script.contains("minimizeview") { return .minimizeWindow }
+        if script.contains("returntomediacenter") { return .returnToMain }
+
+        if let id = quoted(after: "openview(", in: original) {
+            return .openView(id)
+        }
+        if let id = quoted(after: "onviewclose(", in: original) ?? quoted(after: "closeview(", in: original) {
+            return .closePanel(id)
+        }
+        let preference = quotedStrings(after: "savepreference(", in: original)
+        if preference.count >= 2, preference[1].lowercased() == "true",
+           let token = viewToken(from: preference[0]) {
+            return .openPanel(token)
+        }
+        if script.contains("opendialog") || script.contains("openmediafile") { return .openMedia }
+        if let url = quoted(after: "launchurl(", in: original) { return .openURL(url) }
+        if script.contains("setmode") || script.contains("settings.getmode") {
+            if script.contains("shuffle") { return .shuffle }
+            if script.contains("repeat") { return .repeatMode }
+        }
+        return nil
+    }
+
+    /// The sound a control plays when clicked, e.g. `checkSoundPref('button.wav')`.
+    static func sound(for element: Element) -> String? {
+        guard let script = element["onclick"] else { return nil }
+        return quoted(after: "playsound(", in: script) ?? quoted(after: "checksoundpref(", in: script)
+    }
+
+    /// "remoteCallPl" -> "pl", "plViewer" -> "pl", "vidViewer" -> "video".
+    private static func viewToken(from key: String) -> String? {
+        let lowered = key.lowercased()
+        let looksLikeView = lowered.contains("remotecall")
+            || lowered.hasSuffix("viewer")
+            || lowered.hasSuffix("view")
+        guard looksLikeView else { return nil }
+
+        var token = lowered
+            .replacingOccurrences(of: "remotecall", with: "")
+            .replacingOccurrences(of: "viewer", with: "")
+            .replacingOccurrences(of: "view", with: "")
+        token = token.trimmingCharacters(in: CharacterSet.alphanumerics.inverted)
+        guard !token.isEmpty else { return nil }
+        switch token {
+        case "vid": return "video"
+        case "exit", "minimize", "main", "control": return nil
+        default: return token
+        }
+    }
+
+    /// Single-quoted arguments of a call, preserving case.
+    private static func quotedStrings(after marker: String, in text: String) -> [String] {
+        guard let range = text.range(of: marker, options: .caseInsensitive) else { return [] }
+        let rest = text[range.upperBound...]
+        var values: [String] = []
+        var index = rest.startIndex
+        while index < rest.endIndex, values.count < 3 {
+            let character = rest[index]
+            if character == ")" { break }
+            if character == "'" || character == "\"" {
+                let quote = character
+                let start = rest.index(after: index)
+                guard let close = rest[start...].firstIndex(of: quote) else { break }
+                let value = String(rest[start..<close]).trimmingCharacters(in: .whitespaces)
+                if !value.isEmpty { values.append(value) }
+                index = rest.index(after: close)
+                continue
+            }
+            index = rest.index(after: index)
+        }
+        return values
+    }
+
+    private static func quoted(after marker: String, in text: String) -> String? {
+        quotedStrings(after: marker, in: text).first
     }
 
     private static func scan(_ script: String) -> MediaAction? {
@@ -48,6 +131,8 @@ enum ActionResolver {
         if has("play") { return .play }
         if has("stop") { return .stop }
         if has("mute") { return .toggleMute }
+        if has("shuffle") || has("shuff") { return .shuffle }
+        if has("repeat") { return .repeatMode }
         if has("close") { return .closeWindow }
         if has("minimize") || has("min_no") { return .minimizeWindow }
         return nil

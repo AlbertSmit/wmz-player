@@ -1,5 +1,6 @@
 import AppKit
 import CoreGraphics
+import ImageIO
 
 /// Straight RGBA8 pixel buffer used for colour-keying artwork and for looking
 /// up the hit zones encoded in a skin's mapping images.
@@ -100,12 +101,39 @@ public struct RGB: Equatable {
     }
 }
 
+/// A decoded multi-frame image, e.g. the animated GIFs used for visualisations.
+public struct ImageAnimation {
+    public let frames: [CGImage]
+    public let durations: [TimeInterval]
+    public let totalDuration: TimeInterval
+
+    init(frames: [CGImage], durations: [TimeInterval]) {
+        self.frames = frames
+        self.durations = durations
+        self.totalDuration = durations.reduce(0, +)
+    }
+
+    /// Frame index for a monotonically increasing time (seconds).
+    public func frame(at time: TimeInterval) -> CGImage {
+        guard totalDuration > 0, frames.count > 1 else { return frames[0] }
+        var offset = time.truncatingRemainder(dividingBy: totalDuration)
+        if offset < 0 { offset += totalDuration }
+        var elapsed: TimeInterval = 0
+        for (index, duration) in durations.enumerated() {
+            elapsed += duration
+            if offset < elapsed { return frames[index] }
+        }
+        return frames[frames.count - 1]
+    }
+}
+
 /// Loads and caches the artwork that lives next to a `.wms` file.
 public final class SkinAssets {
     public let root: URL
 
     private var files: [String: URL]?
     private var imageCache: [String: CGImage?] = [:]
+    private var animationCache: [String: ImageAnimation?] = [:]
     private var bitmapCache: [String: Bitmap?] = [:]
     private var keyedCache: [String: CGImage] = [:]
     private var sizeCache: [String: CGSize] = [:]
@@ -159,6 +187,55 @@ public final class SkinAssets {
         }
         imageCache[key] = image
         return image
+    }
+
+    /// An animated image's frames; nil for still images (they use `image(named:)`).
+    public func animation(named name: String?) -> ImageAnimation? {
+        guard let name, !name.isEmpty else { return nil }
+        let key = name.lowercased()
+        if let cached = animationCache[key] { return cached }
+
+        var animation: ImageAnimation?
+        if let url = url(for: name),
+           let source = CGImageSourceCreateWithURL(url as CFURL, nil) {
+            let count = CGImageSourceGetCount(source)
+            if count > 1 {
+                let options: [CFString: Any] = [kCGImageSourceShouldCacheImmediately: true]
+                var frames: [CGImage] = []
+                var durations: [TimeInterval] = []
+                frames.reserveCapacity(count)
+                durations.reserveCapacity(count)
+                for index in 0..<count {
+                    guard let frame = CGImageSourceCreateImageAtIndex(source, index, options as CFDictionary)
+                    else { continue }
+                    let properties = CGImageSourceCopyPropertiesAtIndex(source, index, nil)
+                        as? [CFString: Any] ?? [:]
+                    frames.append(frame)
+                    durations.append(frameDuration(properties))
+                }
+                if frames.count > 1 {
+                    animation = ImageAnimation(frames: frames, durations: durations)
+                }
+            }
+        }
+        animationCache[key] = animation
+        return animation
+    }
+
+    /// GIF and APNG delays, clamped so broken artwork cannot spin the render loop.
+    private func frameDuration(_ properties: [CFString: Any]) -> TimeInterval {
+        let keys: [(CFString, CFString)] = [
+            (kCGImagePropertyGIFDictionary, kCGImagePropertyGIFUnclampedDelayTime),
+            (kCGImagePropertyGIFDictionary, kCGImagePropertyGIFDelayTime),
+            (kCGImagePropertyPNGDictionary, kCGImagePropertyAPNGUnclampedDelayTime),
+            (kCGImagePropertyPNGDictionary, kCGImagePropertyAPNGDelayTime),
+        ]
+        for (dictionary, key) in keys {
+            guard let container = properties[dictionary] as? [CFString: Any],
+                  let value = container[key] as? NSNumber else { continue }
+            return max(value.doubleValue, 0.02)
+        }
+        return 0.1
     }
 
     public func size(named name: String?) -> CGSize? {

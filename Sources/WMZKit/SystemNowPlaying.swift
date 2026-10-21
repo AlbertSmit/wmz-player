@@ -37,6 +37,8 @@ final class MediaRemoteBridge {
         case stop = 3
         case nextTrack = 4
         case previousTrack = 5
+        case toggleShuffle = 6
+        case toggleRepeat = 7
     }
 
     private typealias InfoBlock = @convention(block) (CFDictionary?) -> Void

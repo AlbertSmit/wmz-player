@@ -18,6 +18,8 @@ final class SkinView: NSView {
     var renderer: SceneRenderer?
     var onAction: ((MediaAction) -> Void)?
     var onContextMenu: ((NSEvent) -> Void)?
+    var onPlaylistScroll: ((Int) -> Void)?
+    var onSound: ((String) -> Void)?
 
     private(set) var hovered: SceneNode?
     private var pressed: SceneNode?
@@ -103,6 +105,10 @@ final class SkinView: NSView {
             sliderNode = node
             applySlider(slider, fraction: fraction)
 
+        case .playlistRow(_, let node):
+            pressed = node
+            needsDisplay = true
+
         case .background:
             window?.performDrag(with: event)
         }
@@ -140,8 +146,14 @@ final class SkinView: NSView {
         // Fire only when released over the same control. Group hit zones carry
         // their action, so ask the scene again instead of reading node.action.
         let point = scenePoint(event)
-        if case .action(let action, let hitNode) = scene.hitTest(point, state: state), hitNode === node {
+        if let sound = node.sound { onSound?(sound) }
+        switch scene.hitTest(point, state: state) {
+        case .action(let action, let hitNode) where hitNode === node:
             onAction?(action)
+        case .playlistRow(let index, let hitNode) where hitNode === node:
+            onAction?(.playTrack(index))
+        default:
+            break
         }
     }
 
@@ -169,6 +181,17 @@ final class SkinView: NSView {
 
     private func sliderFraction(at point: CGPoint, in frame: CGRect, slider: SliderInfo) -> Double {
         slider.fraction(at: point, in: frame)
+    }
+
+    override func scrollWheel(with event: NSEvent) {
+        guard let scene else { return }
+        if case .playlistRow = scene.hitTest(scenePoint(event), state: state) {
+            if event.scrollingDeltaY != 0 {
+                onPlaylistScroll?(event.scrollingDeltaY > 0 ? -1 : 1)
+            }
+            return
+        }
+        super.scrollWheel(with: event)
     }
 
     override func keyDown(with event: NSEvent) {

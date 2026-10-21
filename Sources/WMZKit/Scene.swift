@@ -9,6 +9,8 @@ public enum NodeKind {
     case slider
     case text
     case video
+    case effects
+    case playlist
     case other
 
     init(elementName: String) {
@@ -20,9 +22,28 @@ public enum NodeKind {
         case "customslider", "slider": self = .slider
         case "text": self = .text
         case "video": self = .video
+        case "effects": self = .effects
+        case "playlist": self = .playlist
         default: self = .other
         }
     }
+}
+
+public struct PlaylistColumn {
+    public let key: String      // name, artist, album, duration, wm/tracknumber …
+    public let label: String
+}
+
+public struct PlaylistInfo {
+    public let columns: [PlaylistColumn]
+    public let backgroundColor: RGB?
+    public let foregroundColor: RGB?
+    public let playingColor: RGB?
+    public let playingBackgroundColor: RGB?
+    public let columnsVisible: Bool
+    public let gradient: Bool
+    public let fontSize: CGFloat
+    public let rowHeight: CGFloat
 }
 
 public struct SliderInfo {
@@ -64,6 +85,8 @@ public final class SceneNode {
     public var children: [SceneNode] = []
     public var action: MediaAction?
     public var slider: SliderInfo?
+    public var playlist: PlaylistInfo?
+    public var sound: String?
     public var zones: [GroupZone] = []
     public var zIndex: Int = 0
     public var hidden = false
@@ -77,7 +100,9 @@ public final class SceneNode {
         self.frame = frame
     }
 
-    public var hasBehaviour: Bool { action != nil || slider != nil || !zones.isEmpty }
+    public var hasBehaviour: Bool {
+        action != nil || slider != nil || playlist != nil || !zones.isEmpty
+    }
 }
 
 public struct Scene {
@@ -87,14 +112,17 @@ public struct Scene {
     public let assets: SkinAssets
     public let title: String
     public let background: RGB?
+    public let document: SkinDocument
 
-    public init(view: Element, root: SceneNode, size: CGSize, assets: SkinAssets, title: String) {
+    public init(view: Element, root: SceneNode, size: CGSize, assets: SkinAssets,
+                title: String, document: SkinDocument) {
         self.view = view
         self.root = root
         self.size = size
         self.assets = assets
         self.title = title
         self.background = RGB(hex: view["backgroundcolor"])
+        self.document = document
     }
 }
 
@@ -132,7 +160,8 @@ private final class Builder {
         let frame = CGRect(x: 0, y: 0, width: width, height: height)
         let root = SceneNode(element: view, kind: .view, frame: frame)
         layoutChildren(of: view, into: root, parentFrame: frame)
-        return Scene(view: view, root: root, size: size, assets: assets, title: document.title)
+        return Scene(view: view, root: root, size: size, assets: assets,
+                     title: document.title, document: document)
     }
 
     // MARK: - Layout
@@ -229,6 +258,8 @@ private final class Builder {
             frames[element.id.lowercased()] = frame
         }
 
+        node.sound = ActionResolver.sound(for: element)
+
         switch kind {
         case .button:
             node.action = ActionResolver.action(for: element)
@@ -240,6 +271,8 @@ private final class Builder {
             }
         case .slider:
             node.slider = makeSlider(element, frame: frame)
+        case .playlist:
+            node.playlist = makePlaylist(element)
         default:
             break
         }
@@ -258,6 +291,32 @@ private final class Builder {
             layoutChildren(of: element, into: node, parentFrame: frame)
         }
         return node
+    }
+
+    private func makePlaylist(_ element: Element) -> PlaylistInfo {
+        let raw = element["columns"] ?? "name=Name;duration=Time"
+        var columns: [PlaylistColumn] = []
+        for part in raw.split(separator: ";") {
+            let pieces = part.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+            let key = pieces.first.map { $0.trimmingCharacters(in: .whitespaces).lowercased() } ?? ""
+            guard !key.isEmpty else { continue }
+            let label = pieces.count > 1 ? pieces[1].trimmingCharacters(in: .whitespaces) : key
+            columns.append(PlaylistColumn(key: key, label: label))
+        }
+        if columns.isEmpty { columns = [PlaylistColumn(key: "name", label: "Name")] }
+
+        let fontSize = CGFloat(element.int("fontsize") ?? 11)
+        return PlaylistInfo(
+            columns: columns,
+            backgroundColor: RGB(hex: element["backgroundcolor"]),
+            foregroundColor: RGB(hex: element["foregroundcolor"]),
+            playingColor: RGB(hex: element["itemplayingcolor"]),
+            playingBackgroundColor: RGB(hex: element["itemplayingbackgroundcolor"]),
+            columnsVisible: element.bool("columnsvisible") ?? false,
+            gradient: element["backgroundimage"]?.lowercased() == "gradient",
+            fontSize: fontSize,
+            rowHeight: ceil(fontSize * 1.5)
+        )
     }
 
     private func makeSlider(_ element: Element, frame: CGRect) -> SliderInfo {
@@ -457,6 +516,7 @@ private final class Builder {
 public enum SceneHit {
     case action(MediaAction, SceneNode)
     case slider(SliderInfo, Double, SceneNode)
+    case playlistRow(Int, SceneNode)
     case background
 }
 
@@ -477,6 +537,13 @@ extension Scene {
                 guard let slider = node.slider else { continue }
                 return .slider(slider, slider.fraction(at: point, in: node.frame), node)
 
+            case .playlist:
+                guard let info = node.playlist else { continue }
+                let row = Int((point.y - node.frame.minY) / info.rowHeight) + state.playlistOffset
+                let index = state.playlistStart + row
+                guard row >= 0, row < state.playlistRows.count else { continue }
+                return .playlistRow(index, node)
+
             case .group:
                 guard !node.zones.isEmpty else { continue }
                 if let zone = zone(at: point, in: node) {
@@ -496,9 +563,17 @@ extension Scene {
         return .background
     }
 
+    public var containsPlaylist: Bool {
+        func walk(_ node: SceneNode) -> Bool {
+            if node.kind == .playlist { return true }
+            return node.children.contains(where: walk)
+        }
+        return walk(root)
+    }
+
     public func node(at point: CGPoint, state: PlayerState) -> SceneNode? {
         switch hitTest(point, state: state) {
-        case .action(_, let node), .slider(_, _, let node): return node
+        case .action(_, let node), .slider(_, _, let node), .playlistRow(_, let node): return node
         case .background: return nil
         }
     }

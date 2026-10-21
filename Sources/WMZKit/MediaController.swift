@@ -27,6 +27,10 @@ public final class MediaController {
     public private(set) var state = PlayerState()
     public var onChange: ((PlayerState) -> Void)?
 
+    /// Set while a playlist panel is open; keeps the queue fetch out of the
+    /// normal polling path.
+    public var needsPlaylist = false
+
     public var target: Target {
         didSet {
             guard target != oldValue else { return }
@@ -52,6 +56,8 @@ public final class MediaController {
     private var seekScheduled = false
     private var lastVolumeWrite = Date.distantPast
     private var lastSeekWrite = Date.distantPast
+    private var lastPlaylistFetch = Date.distantPast
+    private var lastPlaylistKey = ""
 
     public init(target: Target = .auto) {
         self.target = target
@@ -96,6 +102,10 @@ public final class MediaController {
             lastArtworkKey = ""
         }
 
+        if needsPlaylist {
+            attachPlaylist(to: &next, backend: backend)
+        }
+
         state = next
         onChange?(state)
     }
@@ -118,6 +128,67 @@ public final class MediaController {
         case "Tidal": return tidal
         default: return music
         }
+    }
+
+    // MARK: - Extras
+
+    public func scrollPlaylist(by rows: Int) {
+        guard !state.playlistRows.isEmpty else { return }
+        let maximum = max(0, state.playlistRows.count - 1)
+        state.playlistOffset = min(max(0, state.playlistOffset + rows), maximum)
+        onChange?(state)
+    }
+
+    public func openFile(_ url: URL) {
+        _ = PlaylistLoader.openFile(url, application: "Music")
+        refreshNow()
+    }
+
+    private func runSpotify(_ body: String) -> Bool {
+        let script = """
+        tell application "Spotify"
+            \(body)
+        end tell
+        """
+        guard let compiled = NSAppleScript(source: script) else { return false }
+        var error: NSDictionary?
+        _ = compiled.executeAndReturnError(&error)
+        return error == nil
+    }
+
+    // MARK: - Queue
+
+    private func attachPlaylist(to state: inout PlayerState, backend: PlayerBackend) {
+        let key = "\(backend.name)|\(state.title)|\(state.artist)"
+        let stale = Date().timeIntervalSince(lastPlaylistFetch) > 20
+        if key == lastPlaylistKey, !stale {
+            state.playlistName = self.state.playlistName
+            state.playlistRows = self.state.playlistRows
+            state.playlistTotal = self.state.playlistTotal
+            state.playlistCurrent = self.state.playlistCurrent
+            state.playlistStart = self.state.playlistStart
+            state.playlistOffset = self.state.playlistOffset
+            return
+        }
+        lastPlaylistKey = key
+        lastPlaylistFetch = Date()
+
+        if backend.name == "Music",
+           let snapshot = PlaylistLoader.load(application: "Music", radius: 12) {
+            state.playlistName = snapshot.name
+            state.playlistRows = snapshot.rows
+            state.playlistTotal = snapshot.total
+            state.playlistCurrent = snapshot.currentIndex
+            state.playlistStart = snapshot.startIndex
+        } else if state.hasTrack {
+            state.playlistRows = [PlaylistRow(index: 1, title: state.title, artist: state.artist,
+                                              album: state.album, duration: state.duration)]
+            state.playlistTotal = 1
+            state.playlistCurrent = 1
+            state.playlistStart = 1
+        }
+        state.playlistOffset = min(max(0, self.state.playlistOffset),
+                                   max(0, state.playlistRows.count - 1))
     }
 
     // MARK: - Coalesced writes
@@ -205,7 +276,26 @@ public final class MediaController {
                 backend.setVolume(lastVolume > 0 ? lastVolume : 60)
             }
 
-        case .closeWindow, .minimizeWindow:
+        case .playTrack(let index):
+            guard activeBackend().name == "Music" else { return }
+            _ = PlaylistLoader.play(index: index, application: "Music")
+
+        case .shuffle:
+            switch activeBackend().name {
+            case "Music": _ = PlaylistLoader.toggleShuffle(application: "Music")
+            case "Spotify": _ = runSpotify("set shuffling to not shuffling")
+            default: MediaRemoteBridge.shared.send(.toggleShuffle)
+            }
+
+        case .repeatMode:
+            switch activeBackend().name {
+            case "Music": _ = PlaylistLoader.cycleRepeat(application: "Music")
+            case "Spotify": _ = runSpotify("set repeating to not repeating")
+            default: MediaRemoteBridge.shared.send(.toggleRepeat)
+            }
+
+        case .openView, .openPanel, .closePanel, .returnToMain, .openMedia, .openURL,
+             .closeWindow, .minimizeWindow, .ignore:
             return
         }
 

@@ -1,4 +1,5 @@
 import AppKit
+import AVFoundation
 import UniformTypeIdentifiers
 import WMZKit
 
@@ -7,13 +8,62 @@ final class SkinWindow: NSWindow {
     override var canBecomeMain: Bool { true }
 }
 
+/// One open skin view: its window, its scene and its canvas.
+final class ViewWindow: NSObject, NSWindowDelegate {
+    let viewID: String
+    let isMain: Bool
+    let window: SkinWindow
+    let view: SkinView
+    private(set) var scene: Scene
+    private var scale: CGFloat
+
+    init(scene: Scene, viewID: String, isMain: Bool, scale: CGFloat) {
+        self.scene = scene
+        self.viewID = viewID
+        self.isMain = isMain
+        self.scale = scale
+
+        let size = CGSize(width: scene.size.width * scale, height: scene.size.height * scale)
+        window = SkinWindow(contentRect: CGRect(origin: .zero, size: size),
+                            styleMask: [.borderless], backing: .buffered, defer: false)
+        window.isOpaque = false
+        window.backgroundColor = .clear
+        window.hasShadow = true
+        window.isReleasedWhenClosed = false
+        window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+
+        view = SkinView(frame: CGRect(origin: .zero, size: size))
+        view.autoresizingMask = [.width, .height]
+        view.bounds = CGRect(origin: .zero, size: scene.size)
+        view.scene = scene
+        window.contentView = view
+        window.title = scene.title
+        super.init()
+        window.delegate = self
+    }
+
+    func apply(_ state: PlayerState) {
+        view.update(state: state)
+    }
+
+    func setScale(_ newScale: CGFloat) {
+        scale = newScale
+        let size = CGSize(width: scene.size.width * newScale, height: scene.size.height * newScale)
+        view.frame = CGRect(origin: .zero, size: size)
+        view.bounds = CGRect(origin: .zero, size: scene.size)
+        window.setContentSize(size)
+    }
+}
+
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private let media = MediaController()
-    private var document: SkinDocument?
-    private var scene: Scene?
-    private var window: SkinWindow?
-    private var view: SkinView?
+    private let sounds = SoundPlayer()
 
+    private var document: SkinDocument?
+    private var loadedURL: URL?
+    private var main: ViewWindow?
+    private var panels: [String: ViewWindow] = [:]
+    private var panelsMenu = NSMenu(title: "Panels")
     private var scale: CGFloat = 1
     private var alwaysOnTop = false
     private var target: MediaController.Target = .auto
@@ -23,14 +73,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         buildMenu()
-        media.target = .auto
-        media.onChange = { [weak self] state in
-            self?.view?.update(state: state)
-        }
-
-        if ProcessInfo.processInfo.environment["WMZ_DEBUG_NP"] != nil {
-            NSLog("NP %@", NowPlayingProbe.diagnostics())
-        }
+        media.onChange = { [weak self] state in self?.apply(state) }
 
         if let raw = flagValue("--scale"), let ratio = Double(raw), ratio > 0 {
             scale = ratio > 1.5 ? 2 : 1
@@ -43,20 +86,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         }
         media.start()
 
+        redrawTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 15.0, repeats: true) { [weak self] _ in
+            self?.tick()
+        }
+
         if let click = simulatedClick() {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
-                self?.view?.simulateClick(at: click)
+                self?.main?.view.simulateClick(at: click)
             }
         }
         if let drag = simulatedDrag() {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
-                self?.view?.simulateDrag(from: drag.0, to: drag.1)
+                self?.main?.view.simulateDrag(from: drag.0, to: drag.1)
             }
         }
-
-        redrawTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
-            guard let self, let view = self.view, view.state.isPlaying else { return }
-            view.needsDisplay = true
+        if let click = simulatedPanelClick() {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 4.2) { [weak self] in
+                self?.panels.values.first?.view.simulateClick(at: click)
+            }
+        }
+        if let panel = flagValue("--panel") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
+                self?.openPanelView(panel)
+            }
         }
     }
 
@@ -67,55 +119,57 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         return true
     }
 
-    private func flagValue(_ flag: String) -> String? {
-        guard let index = CommandLine.arguments.firstIndex(of: flag),
-              index + 1 < CommandLine.arguments.count else { return nil }
-        return CommandLine.arguments[index + 1]
+    private func tick() {
+        var animated = false
+        for controller in allWindows() {
+            let playing = controller.view.state.isPlaying
+            let animating = controller.view.renderer?.lastFrameAnimated == true
+            if playing || animating { controller.view.needsDisplay = true }
+            animated = animated || animating
+        }
+        // A static skin only needs the once-a-second media redraw, not 15 fps.
+        redrawTimer?.tolerance = animated ? 0.01 : 0.2
     }
 
-    private func simulatedDrag() -> (CGPoint, CGPoint)? {
-        guard let index = CommandLine.arguments.firstIndex(of: "--drag"),
-              index + 1 < CommandLine.arguments.count else { return nil }
-        let numbers = CommandLine.arguments[index + 1].split(separator: ",").compactMap { Double($0) }
-        guard numbers.count == 4 else { return nil }
-        return (CGPoint(x: numbers[0], y: numbers[1]), CGPoint(x: numbers[2], y: numbers[3]))
+    private func allWindows() -> [ViewWindow] {
+        var list: [ViewWindow] = []
+        if let main { list.append(main) }
+        list.append(contentsOf: panels.values)
+        return list
     }
 
-    private func simulatedClick() -> CGPoint? {
-        guard let index = CommandLine.arguments.firstIndex(of: "--click"),
-              index + 1 < CommandLine.arguments.count else { return nil }
-        let parts = CommandLine.arguments[index + 1].split(separator: ",")
-        guard parts.count == 2, let x = Double(parts[0]), let y = Double(parts[1]) else { return nil }
-        return CGPoint(x: x, y: y)
+    private func apply(_ state: PlayerState) {
+        for controller in allWindows() { controller.apply(state) }
     }
 
-    private func launchArgument() -> String? {
-        CommandLine.arguments.dropFirst().first { $0.lowercased().hasSuffix(".wmz") }
-    }
-
-    // MARK: - Skins
+    // MARK: - Skin loading
 
     private func promptForSkin() {
         let panel = NSOpenPanel()
-        if let type = UTType(filenameExtension: "wmz") {
-            panel.allowedContentTypes = [type]
-        }
+        if let type = UTType(filenameExtension: "wmz") { panel.allowedContentTypes = [type] }
         panel.allowsMultipleSelection = false
         panel.message = "Choose a Windows Media Player skin (.wmz)"
         guard panel.runModal() == .OK, let url = panel.url else { return }
         load(url)
     }
 
-    private func load(_ url: URL) {
+    private func load(_ url: URL, force: Bool = false) {
+        if !force, main != nil, loadedURL == url { return }
         do {
+            closeAll()
             let document = try SkinLoader.load(url)
-            let scene = try SceneBuilder.build(document: document)
+            guard let primary = document.primaryView else { throw SkinError.noViews }
+            let scene = try SceneBuilder.build(document: document, view: primary)
             let previous = self.document?.rootURL
             self.document = document
-            self.scene = scene
-            if let previous { try? FileManager.default.removeItem(at: previous) }
+            self.loadedURL = url
             UserDefaults.standard.set(url.path, forKey: "skinPath")
-            show(scene: scene, title: document.title)
+            if let previous { try? FileManager.default.removeItem(at: previous) }
+
+            showMain(scene: scene, viewID: primary.id)
+            restorePanels()
+            rebuildPanelsMenu()
+            updatePlaylistNeed()
         } catch {
             let alert = NSAlert()
             alert.messageText = "That skin did not load"
@@ -125,72 +179,219 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         }
     }
 
-    private func show(scene: Scene, title: String) {
-        let size = CGSize(width: scene.size.width * scale, height: scene.size.height * scale)
-
-        let window: SkinWindow
-        let view: SkinView
-        if let existing = self.window, let existingView = self.view {
-            window = existing
-            view = existingView
-        } else {
-            window = SkinWindow(
-                contentRect: CGRect(origin: .zero, size: size),
-                styleMask: [.borderless],
-                backing: .buffered,
-                defer: false
-            )
-            window.isOpaque = false
-            window.backgroundColor = .clear
-            window.hasShadow = true
-            window.isReleasedWhenClosed = false
-            window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-            window.level = alwaysOnTop ? .floating : .normal
-
-            view = SkinView(frame: CGRect(origin: .zero, size: size))
-            view.autoresizingMask = [.width, .height]
-            window.contentView = view
-            view.onAction = { [weak self] action in self?.handle(action) }
-            view.onContextMenu = { [weak self] event in self?.showContextMenu(event) }
-            self.window = window
-            self.view = view
-        }
-
-        view.frame = CGRect(origin: .zero, size: size)
-        view.bounds = CGRect(origin: .zero, size: scene.size)
-        view.scene = scene
-        window.setContentSize(size)
-        window.title = title
-        window.level = alwaysOnTop ? .floating : .normal
-
-        if window.frame.origin == .zero {
-            window.center()
-        }
-        window.makeKeyAndOrderFront(nil)
-        window.makeFirstResponder(view)
+    private func showMain(scene: Scene, viewID: String) {
+        let controller = ViewWindow(scene: scene, viewID: viewID, isMain: true, scale: scale)
+        wire(controller)
+        main = controller
+        controller.window.level = alwaysOnTop ? .floating : .normal
+        controller.window.center()
+        controller.window.makeKeyAndOrderFront(nil)
+        controller.window.makeFirstResponder(controller.view)
         NSApp.activate(ignoringOtherApps: true)
     }
 
-    private func handle(_ action: MediaAction) {
+    private func wire(_ controller: ViewWindow) {
+        let viewID = controller.viewID
+        controller.view.onAction = { [weak self] action in self?.handle(action, from: viewID) }
+        controller.view.onContextMenu = { [weak self] event in self?.showContextMenu(event) }
+        controller.view.onSound = { [weak self] name in self?.playSound(name, from: viewID) }
+        controller.view.onPlaylistScroll = { [weak self] rows in self?.media.scrollPlaylist(by: rows) }
+    }
+
+    private func closeAll() {
+        for controller in allWindows() { controller.window.orderOut(nil) }
+        panels.removeAll()
+        main = nil
+    }
+
+    // MARK: - Panels
+
+    private func openPanelView(_ viewID: String) {
+        guard let document else { return }
+        if let main, main.viewID.caseInsensitiveCompare(viewID) == .orderedSame {
+            main.window.makeKeyAndOrderFront(nil)
+            return
+        }
+        if let existing = panels[viewID] {
+            existing.window.makeKeyAndOrderFront(nil)
+            return
+        }
+        guard let view = document.view(id: viewID) else { return }
+        do {
+            let scene = try SceneBuilder.build(document: document, view: view)
+            let controller = ViewWindow(scene: scene, viewID: viewID, isMain: false, scale: scale)
+            wire(controller)
+            controller.window.level = alwaysOnTop ? .floating : .normal
+
+            let base = main?.window.frame.origin ?? CGPoint(x: 120, y: 120)
+            let step = CGFloat(panels.count + 1) * 32
+            controller.window.setFrameOrigin(CGPoint(x: base.x + step, y: base.y - step))
+            controller.window.makeKeyAndOrderFront(nil)
+            panels[viewID] = controller
+            persistPanels()
+            rebuildPanelsMenu()
+            updatePlaylistNeed()
+            controller.apply(media.state)
+        } catch {
+            NSLog("WMZPlayer: could not open %@: %@", viewID, error.localizedDescription)
+        }
+    }
+
+    private func closePanel(_ viewID: String) {
+        let key = panels.keys.first { $0.caseInsensitiveCompare(viewID) == .orderedSame }
+        guard let key, let controller = panels.removeValue(forKey: key) else { return }
+        controller.window.orderOut(nil)
+        persistPanels()
+        rebuildPanelsMenu()
+        updatePlaylistNeed()
+    }
+
+    private func togglePanel(token: String) {
+        guard let viewID = resolveViewID(token) else { return }
+        if panels.keys.contains(where: { $0.caseInsensitiveCompare(viewID) == .orderedSame }) {
+            closePanel(viewID)
+        } else {
+            openPanelView(viewID)
+        }
+    }
+
+    /// "pl" -> plView, "video" -> videoView, or an exact id.
+    private func resolveViewID(_ token: String) -> String? {
+        guard let document else { return nil }
+        let raw = token.lowercased()
+        if let exact = document.views.first(where: { $0.id.lowercased() == raw }) {
+            return exact.id
+        }
+        // Preference keys arrive as "plViewer"/"remoteCallPl"; reduce them to the
+        // stem the view ids are built from.
+        var lowered = raw.replacingOccurrences(of: "remotecall", with: "")
+        for suffix in ["viewer", "view"] where lowered.hasSuffix(suffix) {
+            lowered.removeLast(suffix.count)
+        }
+        if lowered == "vid" { lowered = "video" }
+        guard !lowered.isEmpty else { return nil }
+        let excluded = ["control", "preview", "upgrade"]
+        let candidates = document.views.filter { view in
+            let id = view.id.lowercased()
+            guard !id.isEmpty, !excluded.contains(where: { id.contains($0) }) else { return false }
+            guard id != document.primaryView?.id.lowercased() else { return false }
+            return id.contains(lowered)
+        }
+        return candidates.first?.id
+    }
+
+    private func restorePanels() {
+        guard let stored = UserDefaults.standard.stringArray(forKey: "openPanels") else { return }
+        for id in stored.prefix(4) { openPanelView(id) }
+    }
+
+    private func persistPanels() {
+        UserDefaults.standard.set(Array(panels.keys), forKey: "openPanels")
+    }
+
+    private func updatePlaylistNeed() {
+        media.needsPlaylist = allWindows().contains { $0.scene.containsPlaylist }
+    }
+
+    private func rebuildPanelsMenu() {
+        panelsMenu.removeAllItems()
+        guard let document else { return }
+        let excluded = ["control", "preview", "upgrade"]
+        let primary = document.primaryView?.id.lowercased()
+        for view in document.views {
+            let id = view.id
+            let lowered = id.lowercased()
+            guard !id.isEmpty, lowered != primary,
+                  !excluded.contains(where: { lowered.contains($0) }) else { continue }
+            let item = NSMenuItem(title: Self.prettyName(id), action: #selector(togglePanelFromMenu(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = id
+            item.state = panels[id] != nil ? .on : .off
+            panelsMenu.addItem(item)
+        }
+        if panelsMenu.items.isEmpty {
+            let empty = NSMenuItem(title: "No panels in this skin", action: nil, keyEquivalent: "")
+            empty.isEnabled = false
+            panelsMenu.addItem(empty)
+        }
+    }
+
+    private static func prettyName(_ id: String) -> String {
+        var name = id
+        if name.lowercased().hasSuffix("view") { name.removeLast(4) }
+        if name.lowercased() == "pl" { return "Playlist" }
+        if name.lowercased() == "eq" { return "Equalizer" }
+        if name.lowercased() == "vis" { return "Visualization" }
+        // split camel case: plView -> pl, videoView -> video
+        var words: [String] = []
+        var current = ""
+        for character in name {
+            if character.isUppercase, !current.isEmpty {
+                words.append(current); current = ""
+            }
+            current.append(character)
+        }
+        if !current.isEmpty { words.append(current) }
+        let joined = words.joined(separator: " ")
+        return joined.prefix(1).uppercased() + joined.dropFirst()
+    }
+
+    // MARK: - Actions
+
+    private func handle(_ action: MediaAction, from viewID: String) {
         switch action {
+        case .openView(let id):
+            openPanelView(id)
+        case .openPanel(let token):
+            togglePanel(token: token)
+        case .closePanel(let token):
+            if let id = resolveViewID(token) {
+                closePanel(id)
+            } else {
+                closePanel(viewID)
+            }
+        case .returnToMain:
+            main?.window.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+        case .openMedia:
+            pickMediaFile()
+        case .openURL(let string):
+            if let url = URL(string: string) { NSWorkspace.shared.open(url) }
         case .closeWindow:
-            NSApp.terminate(nil)
+            if let main, main.viewID.caseInsensitiveCompare(viewID) == .orderedSame {
+                NSApp.terminate(nil)
+            } else {
+                closePanel(viewID)
+            }
         case .minimizeWindow:
-            window?.miniaturize(nil)
-        case .ignore:
-            break
+            allWindows().first { $0.viewID == viewID }?.window.miniaturize(nil)
         default:
             media.perform(action)
         }
     }
 
+    private func pickMediaFile() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.audio]
+        panel.allowsMultipleSelection = false
+        panel.message = "Open an audio file in Music"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        media.openFile(url)
+    }
+
+    private func playSound(_ name: String, from viewID: String) {
+        guard let controller = allWindows().first(where: { $0.viewID == viewID }),
+              let url = controller.scene.assets.url(for: name) else { return }
+        sounds.play(url)
+    }
+
     // MARK: - Menu
 
     private func buildMenu() {
-        let main = NSMenu()
+        let mainMenu = NSMenu()
 
         let appItem = NSMenuItem()
-        main.addItem(appItem)
+        mainMenu.addItem(appItem)
         let appMenu = NSMenu()
         appMenu.addItem(withTitle: "About WMZPlayer", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
         appMenu.addItem(.separator())
@@ -198,40 +399,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         appItem.submenu = appMenu
 
         let fileItem = NSMenuItem()
-        main.addItem(fileItem)
+        mainMenu.addItem(fileItem)
         let fileMenu = NSMenu(title: "File")
-        let open = NSMenuItem(title: "Open Skin…", action: #selector(openSkin(_:)), keyEquivalent: "o")
-        open.target = self
-        fileMenu.addItem(open)
-        let reload = NSMenuItem(title: "Reload Skin", action: #selector(reloadSkin(_:)), keyEquivalent: "r")
-        reload.target = self
-        fileMenu.addItem(reload)
+        fileMenu.addItem(item("Open Skin…", #selector(openSkin(_:)), "o"))
+        fileMenu.addItem(item("Reload Skin", #selector(reloadSkin(_:)), "r"))
         fileItem.submenu = fileMenu
 
         let playerItem = NSMenuItem()
-        main.addItem(playerItem)
+        mainMenu.addItem(playerItem)
         let playerMenu = NSMenu(title: "Player")
-        playerMenu.addItem(playerMenuItem("Automatic", action: #selector(useAuto(_:)), tag: 100))
-        playerMenu.addItem(playerMenuItem("Apple Music", action: #selector(useMusic(_:)), tag: 101))
-        playerMenu.addItem(playerMenuItem("Spotify", action: #selector(useSpotify(_:)), tag: 102))
-        playerMenu.addItem(playerMenuItem("Tidal", action: #selector(useTidal(_:)), tag: 103))
+        playerMenu.addItem(tagged("Automatic", #selector(useAuto(_:)), 100))
+        playerMenu.addItem(tagged("Apple Music", #selector(useMusic(_:)), 101))
+        playerMenu.addItem(tagged("Spotify", #selector(useSpotify(_:)), 102))
+        playerMenu.addItem(tagged("Tidal", #selector(useTidal(_:)), 103))
         playerItem.submenu = playerMenu
 
+        let panelsItem = NSMenuItem()
+        mainMenu.addItem(panelsItem)
+        panelsItem.submenu = panelsMenu
+
         let windowItem = NSMenuItem()
-        main.addItem(windowItem)
+        mainMenu.addItem(windowItem)
         let windowMenu = NSMenu(title: "Window")
-        windowMenu.addItem(playerMenuItem("Double Size", action: #selector(toggleScale(_:)), tag: 110))
-        windowMenu.addItem(playerMenuItem("Always on Top", action: #selector(toggleTop(_:)), tag: 111))
+        windowMenu.addItem(tagged("Double Size", #selector(toggleScale(_:)), 110))
+        windowMenu.addItem(tagged("Always on Top", #selector(toggleTop(_:)), 111))
         windowMenu.addItem(.separator())
         windowMenu.addItem(withTitle: "Close", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
         windowItem.submenu = windowMenu
 
-        NSApp.mainMenu = main
+        NSApp.mainMenu = mainMenu
     }
 
-    private func playerMenuItem(_ title: String, action: Selector, tag: Int) -> NSMenuItem {
-        let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+    private func item(_ title: String, _ action: Selector, _ key: String) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: action, keyEquivalent: key)
         item.target = self
+        return item
+    }
+
+    private func tagged(_ title: String, _ action: Selector, _ tag: Int) -> NSMenuItem {
+        let item = item(title, action, "")
         item.tag = tag
         return item
     }
@@ -250,7 +456,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         case 123: menuItem.state = target == .music ? .on : .off
         case 124: menuItem.state = target == .spotify ? .on : .off
         case 125: menuItem.state = target == .tidal ? .on : .off
-        default: break
+        default:
+            if let id = menuItem.representedObject as? String {
+                menuItem.state = panels[id] != nil ? .on : .off
+            }
         }
         return true
     }
@@ -259,7 +468,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
     @objc private func reloadSkin(_ sender: Any?) {
         guard let path = UserDefaults.standard.string(forKey: "skinPath") else { return }
-        load(URL(fileURLWithPath: path))
+        load(URL(fileURLWithPath: path), force: true)
     }
 
     @objc private func useAuto(_ sender: Any?) { target = .auto; media.target = .auto }
@@ -269,37 +478,94 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
     @objc private func toggleScale(_ sender: Any?) {
         scale = scale > 1 ? 1 : 2
-        if let scene { show(scene: scene, title: document?.title ?? "") }
+        for controller in allWindows() { controller.setScale(scale) }
     }
 
     @objc private func toggleTop(_ sender: Any?) {
         alwaysOnTop.toggle()
-        window?.level = alwaysOnTop ? .floating : .normal
+        for controller in allWindows() {
+            controller.window.level = alwaysOnTop ? .floating : .normal
+        }
+    }
+
+    @objc private func togglePanelFromMenu(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String else { return }
+        if panels[id] != nil { closePanel(id) } else { openPanelView(id) }
     }
 
     private func showContextMenu(_ event: NSEvent) {
         let menu = NSMenu()
-
-        let open = NSMenuItem(title: "Open Skin…", action: #selector(openSkin(_:)), keyEquivalent: "")
-        open.target = self
-        menu.addItem(open)
+        menu.addItem(item("Open Skin…", #selector(openSkin(_:)), ""))
 
         let playerItem = NSMenuItem(title: "Player", action: nil, keyEquivalent: "")
         let playerMenu = NSMenu()
-        playerMenu.addItem(playerMenuItem("Automatic", action: #selector(useAuto(_:)), tag: 122))
-        playerMenu.addItem(playerMenuItem("Apple Music", action: #selector(useMusic(_:)), tag: 123))
-        playerMenu.addItem(playerMenuItem("Spotify", action: #selector(useSpotify(_:)), tag: 124))
-        playerMenu.addItem(playerMenuItem("Tidal", action: #selector(useTidal(_:)), tag: 125))
+        playerMenu.addItem(tagged("Automatic", #selector(useAuto(_:)), 122))
+        playerMenu.addItem(tagged("Apple Music", #selector(useMusic(_:)), 123))
+        playerMenu.addItem(tagged("Spotify", #selector(useSpotify(_:)), 124))
+        playerMenu.addItem(tagged("Tidal", #selector(useTidal(_:)), 125))
         playerItem.submenu = playerMenu
         menu.addItem(playerItem)
 
+        if !panelsMenu.items.isEmpty, panelsMenu.items.first?.action != nil {
+            let panelsItem = NSMenuItem(title: "Panels", action: nil, keyEquivalent: "")
+            panelsItem.submenu = panelsMenu.copy() as? NSMenu
+            menu.addItem(panelsItem)
+        }
+
         menu.addItem(.separator())
-        menu.addItem(playerMenuItem("Double Size", action: #selector(toggleScale(_:)), tag: 121))
-        menu.addItem(playerMenuItem("Always on Top", action: #selector(toggleTop(_:)), tag: 120))
+        menu.addItem(tagged("Double Size", #selector(toggleScale(_:)), 121))
+        menu.addItem(tagged("Always on Top", #selector(toggleTop(_:)), 120))
         menu.addItem(.separator())
         menu.addItem(withTitle: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "")
 
-        for item in menu.items { _ = validateMenuItem(item) }
-        NSMenu.popUpContextMenu(menu, with: event, for: view ?? window!.contentView!)
+        for entry in menu.items { _ = validateMenuItem(entry) }
+        if let view = main?.view {
+            NSMenu.popUpContextMenu(menu, with: event, for: view)
+        }
+    }
+
+    // MARK: - Test hooks
+
+    private func flagValue(_ flag: String) -> String? {
+        guard let index = CommandLine.arguments.firstIndex(of: flag),
+              index + 1 < CommandLine.arguments.count else { return nil }
+        return CommandLine.arguments[index + 1]
+    }
+
+    private func launchArgument() -> String? {
+        CommandLine.arguments.dropFirst().first { $0.lowercased().hasSuffix(".wmz") }
+    }
+
+    private func simulatedClick() -> CGPoint? {
+        guard let raw = flagValue("--click") else { return nil }
+        let parts = raw.split(separator: ",")
+        guard parts.count == 2, let x = Double(parts[0]), let y = Double(parts[1]) else { return nil }
+        return CGPoint(x: x, y: y)
+    }
+
+    private func simulatedPanelClick() -> CGPoint? {
+        guard let raw = flagValue("--panel-click") else { return nil }
+        let parts = raw.split(separator: ",")
+        guard parts.count == 2, let x = Double(parts[0]), let y = Double(parts[1]) else { return nil }
+        return CGPoint(x: x, y: y)
+    }
+
+    private func simulatedDrag() -> (CGPoint, CGPoint)? {
+        guard let raw = flagValue("--drag") else { return nil }
+        let numbers = raw.split(separator: ",").compactMap { Double($0) }
+        guard numbers.count == 4 else { return nil }
+        return (CGPoint(x: numbers[0], y: numbers[1]), CGPoint(x: numbers[2], y: numbers[3]))
+    }
+}
+
+/// Short UI sounds stored inside the skin (`theme.playSound`).
+final class SoundPlayer {
+    private var active: [AVAudioPlayer] = []
+
+    func play(_ url: URL) {
+        guard let player = try? AVAudioPlayer(contentsOf: url) else { return }
+        player.play()
+        active.append(player)
+        if active.count > 4 { active.removeFirst().stop() }
     }
 }

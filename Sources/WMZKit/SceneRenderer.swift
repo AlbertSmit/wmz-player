@@ -1,6 +1,7 @@
 import AppKit
 import CoreGraphics
 import CoreText
+import QuartzCore
 
 /// Draws a parsed skin. The context must be in "screen" coordinates: origin at
 /// the top-left, y growing downwards, one unit per skin pixel.
@@ -9,6 +10,8 @@ public final class SceneRenderer {
     private let assets: SkinAssets
     private var artworkCache: [String: CGImage] = [:]
     private var textCache: [String: CGImage] = [:]
+    /// Set while drawing so the window knows it needs a fast redraw timer.
+    public private(set) var lastFrameAnimated = false
 
     public init(scene: Scene) {
         self.scene = scene
@@ -16,6 +19,7 @@ public final class SceneRenderer {
     }
 
     public func draw(in ctx: CGContext, state: PlayerState, hovered: SceneNode? = nil, pressed: SceneNode? = nil) {
+        lastFrameAnimated = false
         ctx.saveGState()
         ctx.interpolationQuality = .none
         ctx.setAllowsAntialiasing(true)
@@ -31,14 +35,28 @@ public final class SceneRenderer {
     private func drawChildren(of node: SceneNode, state: PlayerState,
                               hovered: SceneNode?, pressed: SceneNode?, ctx: CGContext) {
         let ordered = node.children.enumerated().sorted { lhs, rhs in
-            let l = lhs.element.zIndex, r = rhs.element.zIndex
-            return l == r ? lhs.offset < rhs.offset : l < r
+            let ll = layer(of: lhs.element.element), rl = layer(of: rhs.element.element)
+            if ll != rl { return ll < rl }
+            let lz = lhs.element.zIndex, rz = rhs.element.zIndex
+            return lz == rz ? lhs.offset < rhs.offset : lz < rz
         }.map { $0.element }
 
         for child in ordered {
             guard !child.hidden, ActionResolver.isVisible(child.element, state: state) else { continue }
             draw(node: child, state: state, hovered: hovered, pressed: pressed, ctx: ctx)
         }
+    }
+
+    /// Frame decoration (corner pieces and tile strips) is painted behind the
+    /// content panes regardless of zIndex: skins give those pieces positive
+    /// z-indices, but the playlist/effects panes they surround must win.
+    private func layer(of element: Element) -> Int {
+        guard element.name == "subview" else { return 0 }
+        // A subview that is nothing but artwork is frame decoration; WMP paints
+        // those behind the subviews that actually hold content, whatever the
+        // z-index says.
+        let isPlainArtwork = element["backgroundimage"] != nil && element.children.isEmpty
+        return isPlainArtwork ? -1 : 0
     }
 
     private func draw(node: SceneNode, state: PlayerState,
@@ -66,6 +84,14 @@ public final class SceneRenderer {
         case .video:
             drawArtwork(node, state: state, ctx: ctx)
 
+        case .effects:
+            ctx.setFillColor(CGColor(red: 0, green: 0, blue: 0, alpha: 1))
+            ctx.fill(node.frame)
+            drawArtwork(node, state: state, ctx: ctx)
+
+        case .playlist:
+            drawPlaylist(node, state: state, ctx: ctx)
+
         case .other:
             break
         }
@@ -89,8 +115,13 @@ public final class SceneRenderer {
             ctx.setFillColor(colour.color)
             ctx.fill(frame)
         }
-        guard let name = element["backgroundimage"],
-              let image = assets.keyed(named: name, colours: element.keyColours) else { return }
+        guard let name = element["backgroundimage"] else { return }
+        if let animation = assets.animation(named: name) {
+            lastFrameAnimated = true
+            drawImage(animation.frame(at: CACurrentMediaTime()), in: frame, ctx: ctx)
+            return
+        }
+        guard let image = assets.keyed(named: name, colours: element.keyColours) else { return }
         if element["backgroundtiled"]?.lowercased() == "true" {
             ctx.saveGState()
             ctx.clip(to: frame)
@@ -118,8 +149,6 @@ public final class SceneRenderer {
         if pressed === node, let down = node.element["downimage"] { name = down }
         else if hovered === node, let hover = node.element["hoverimage"] { name = hover }
 
-        guard let image = assets.keyed(named: name, colours: node.element.keyColours) else { return }
-
         var frame = node.frame
         if let offset = digitOffset(for: node, state: state) {
             frame.origin.x += offset
@@ -127,6 +156,16 @@ public final class SceneRenderer {
 
         let blend = node.element.int("alphablend").map { CGFloat($0) / 255 } ?? 1
         guard blend > 0 else { return }
+
+        let image: CGImage?
+        if let animation = assets.animation(named: name) {
+            lastFrameAnimated = true
+            image = animation.frame(at: CACurrentMediaTime())
+        } else {
+            image = assets.keyed(named: name, colours: node.element.keyColours)
+        }
+        guard let image else { return }
+
         ctx.saveGState()
         ctx.setAlpha(blend)
         drawImage(image, in: frame, ctx: ctx)
@@ -260,6 +299,135 @@ public final class SceneRenderer {
         let image = ctx.makeImage()
         if let image { textCache[key] = image }
         return image
+    }
+
+    // MARK: - Playlist
+
+    private func drawPlaylist(_ node: SceneNode, state: PlayerState, ctx: CGContext) {
+        guard let info = node.playlist else { return }
+        let frame = node.frame
+        guard frame.width > 4, frame.height > 4 else { return }
+
+        ctx.saveGState()
+        ctx.clip(to: frame)
+
+        if info.gradient {
+            let colors = [
+                CGColor(srgbRed: 0.13, green: 0.11, blue: 0.08, alpha: 1),
+                CGColor(srgbRed: 0.03, green: 0.03, blue: 0.02, alpha: 1)
+            ]
+            if let gradient = CGGradient(colorsSpace: CGColorSpace(name: CGColorSpace.sRGB),
+                                         colors: colors as CFArray, locations: [0, 1]) {
+                ctx.drawLinearGradient(gradient,
+                                       start: CGPoint(x: 0, y: frame.maxY),
+                                       end: CGPoint(x: 0, y: frame.minY),
+                                       options: [])
+            }
+        } else {
+            ctx.setFillColor((info.backgroundColor ?? RGB(r: 0, g: 0, b: 0)).color)
+            ctx.fill(frame)
+        }
+
+        let lastIndex = state.playlistStart + state.playlistRows.count
+        let widths = columnWidths(info, total: frame.width, maxIndex: lastIndex)
+        let foreground = info.foregroundColor ?? RGB(r: 235, g: 235, b: 235)
+        var y = frame.minY
+
+        if info.columnsVisible {
+            drawPlaylistCells(info.columns.map(\.label), widths: widths, origin: CGPoint(x: frame.minX, y: y),
+                              info: info, color: foreground, bold: true, ctx: ctx)
+            y += info.rowHeight
+        }
+
+        let rowsHeight = frame.maxY - y
+        guard rowsHeight > 0 else { ctx.restoreGState(); return }
+        let visible = Int(ceil(rowsHeight / info.rowHeight))
+        let offset = max(0, state.playlistOffset)
+
+        for line in 0..<visible {
+            let index = offset + line
+            guard index < state.playlistRows.count else { break }
+            let row = state.playlistRows[index]
+            let top = y + CGFloat(line) * info.rowHeight
+            let playing = row.index == state.playlistCurrent
+
+            if playing, let background = info.playingBackgroundColor {
+                ctx.setFillColor(background.color)
+                ctx.fill(CGRect(x: frame.minX, y: top, width: frame.width, height: info.rowHeight))
+            }
+
+            let colour = playing ? (info.playingColor ?? foreground) : foreground
+            let cells = info.columns.map { cellText(for: $0.key, row: row) }
+            drawPlaylistCells(cells, widths: widths, origin: CGPoint(x: frame.minX, y: top),
+                              info: info, color: colour, bold: playing, ctx: ctx)
+        }
+
+        ctx.restoreGState()
+    }
+
+    private func drawPlaylistCells(_ cells: [String], widths: [CGFloat], origin: CGPoint,
+                                   info: PlaylistInfo, color: RGB, bold: Bool, ctx: CGContext) {
+        var x = origin.x
+        for (index, cell) in cells.enumerated() where index < widths.count {
+            let width = widths[index]
+            defer { x += width }
+            guard !cell.isEmpty, width > 8 else { continue }
+            let key = info.columns[index].key
+            let alignment = (key.contains("duration") || key.contains("length")
+                             || key.contains("tracknumber") || key == "track") ? "right" : "left"
+            let canvas = CGSize(width: max(1, width - 8), height: info.rowHeight)
+            guard let image = textImage(cell, face: "Helvetica", size: info.fontSize,
+                                        style: bold ? "bold" : "", colour: color,
+                                        alignment: alignment, canvas: canvas) else { continue }
+            drawImage(image, in: CGRect(x: x + 4, y: origin.y, width: canvas.width, height: info.rowHeight),
+                      ctx: ctx)
+        }
+    }
+
+    private func cellText(for key: String, row: PlaylistRow) -> String {
+        switch key {
+        case "name", "title": return row.title
+        case "artist": return row.artist
+        case "album": return row.album
+        case "duration", "length", "time": return timecode(row.duration)
+        case "wm/tracknumber", "tracknumber", "track": return String(row.index)
+        default: return ""
+        }
+    }
+
+    private func timecode(_ seconds: Double) -> String {
+        let total = Int(max(0, seconds))
+        return String(format: "%d:%02d", total / 60, total % 60)
+    }
+
+    private func columnWidths(_ info: PlaylistInfo, total: CGFloat, maxIndex: Int) -> [CGFloat] {
+        var fixed: [Int: CGFloat] = [:]
+        var weights: [Int: CGFloat] = [:]
+        // Library positions can be five digits; size the track column for them.
+        let digits = max(2, String(maxIndex).count)
+        let trackWidth = max(26, CGFloat(digits) * 6.6 + 10)
+        for (index, column) in info.columns.enumerated() {
+            switch column.key {
+            case "duration", "length", "time": fixed[index] = 46
+            case "wm/tracknumber", "tracknumber", "track": fixed[index] = trackWidth
+            case "name", "title": weights[index] = 3
+            case "artist": weights[index] = 2
+            case "album": weights[index] = 1.6
+            default: weights[index] = 1
+            }
+        }
+        let fixedTotal = fixed.values.reduce(0, +)
+        let weightTotal = weights.values.reduce(0, +)
+        let remaining = max(0, total - fixedTotal)
+        var widths = [CGFloat](repeating: 0, count: info.columns.count)
+        for index in 0..<info.columns.count {
+            if let value = fixed[index] {
+                widths[index] = value
+            } else if let weight = weights[index], weightTotal > 0 {
+                widths[index] = remaining * weight / weightTotal
+            }
+        }
+        return widths
     }
 
     private func drawArtwork(_ node: SceneNode, state: PlayerState, ctx: CGContext) {

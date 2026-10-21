@@ -34,6 +34,15 @@ actually running.
   diagonals, and know which way the artwork fills.
 - **Live metadata.** Track title, artist and the ten-digit `time1…time4` image
   strips update while the music plays.
+- **Panels, like the original.** Playlist, equalizer, visualization and info
+  views open as their own windows at the size the skin declares, frame and
+  buttons included.
+- **A real playlist.** The `<playlist>` control is drawn with the skin's own
+  columns and colours and filled from the Music queue; click a row to play it.
+- **Animated GIFs and click sounds.** Multi-frame artwork animates at its own
+  rate, and `theme.playSound` effects play.
+- **The whole button map:** transport, mute, shuffle/repeat, volume, seek,
+  panel open/close, file picker, URLs, close and minimize.
 - **Apple Music, Spotify and Tidal**, chosen automatically or pinned in the menu.
 - **Double size, always-on-top, draggable** from anywhere that is not a control.
 - **A CLI for skinsmiths**: inspect a skin, render it offscreen, or ask what a
@@ -78,6 +87,9 @@ Without that permission those two players cannot be driven.
 | Seek | Drag the skin's seek control, or press **← / →** |
 | Volume | Drag the skin's volume control, or press **↑ / ↓** |
 | Move the window | Drag any non-control part of the skin |
+| Open a panel | The skin's own button, or **Panels** in the menu |
+| Play a track | Click a row in the playlist panel |
+| Scroll the playlist | Scroll wheel over the list |
 | Menu | Right-click / control-click the skin |
 | Player choice | **Player → Automatic / Apple Music / Spotify / Tidal** |
 | Size and stacking | **Window → Double Size**, **Always on Top** |
@@ -109,9 +121,10 @@ and stops, but the title area stays empty and the seek slider is inert.
 wmz inspect  <skin.wmz>                  # views, controls, resolved actions
 wmz render   <skin.wmz> --out preview.png
              [--scale 2] [--on 202020] [--view <id>] [--playing]
-wmz hit      <skin.wmz> --at 230,190     # what a click at that point would do
+wmz hit      <skin.wmz> --at 230,190 [--view <id>]
 wmz media    [--target music|spotify|tidal|auto] [--seconds <n>]
              [--bundle <fragment>]       # read any app through Now Playing
+wmz queue                                # the current Music queue window
 ```
 
 `render --on <hex>` fills the background first, which is the only sane way to
@@ -144,6 +157,9 @@ The renderer supports the parts that carry the look of a skin:
 | Artwork | `backgroundImage` (plain and tiled), `backgroundColor`, transparency keying |
 | Controls | `<button>` normal/hover/down states, `<buttongroup>` with `mappingImage` zones |
 | Sliders | `<customSlider>` sprite strips; direction fitted from the artwork |
+| Playlist | `<playlist>` columns and colours, filled from Music's queue |
+| Effects | `<effects>` hosts album art for now (our own visualizer is next) |
+| Animation | multi-frame GIF artwork plays at the file's own frame rate |
 | Text | font, size, colour, justification, `wmpprop:` bindings, title/artist/time |
 | Video | `<video>` becomes the current track's artwork |
 
@@ -170,6 +186,11 @@ Skins that build their interface from JScript at runtime — Microsoft's own
 - Playlists, equalizer, visualizations, video surfaces and entrance animations
   are ignored; skin sound effects are not played.
 - Tidal's metadata and seeking depend on the macOS build (see [Players](#players)).
+- The playlist panel loads the dozen or so rows around the current track; it is
+  not an endless list, and only Music exposes a queue.
+- The equalizer panel renders and reacts, but cannot process another app's audio
+  without a virtual audio device in the signal path.
+- Skins whose layout is produced by their JScript still render statically.
 - The renderer is intentionally a subset of WMP's UI vocabulary. If a skin looks
   wrong, `wmz inspect` will usually show why.
 
@@ -199,6 +220,7 @@ Sources/WMZKit/          engine
   Scene.swift            layout, slider geometry, hit testing
   SceneRenderer.swift    drawing
   SkinAssets.swift       images, transparency keying, sprite frames
+  PlaylistLoader.swift   Music queue + shuffle/repeat/file open
   ActionResolver.swift   WMP commands → MediaAction
   MediaController.swift  AppleScript backends
   SystemNowPlaying.swift MediaRemote bridge + Tidal
@@ -226,9 +248,9 @@ wmz render skin.wmz --out skin.png --on 202020 --scale 2
 open skin.png
 ```
 
-The app also accepts hidden test flags: `--click x,y` and `--drag x1,y1,x2,y2`
-(coordinates in skin pixels), which drive the same code path as a real mouse
-event. `WMZ_DEBUG_NP=1` logs what MediaRemote can see on your machine.
+The app also accepts hidden test flags: `--click x,y`, `--drag x1,y1,x2,y2`,
+`--panel <id>` and `--panel-click x,y` (coordinates in skin pixels), which drive
+the same code path as a real mouse event. `WMZ_DEBUG_NP=1` logs what MediaRemote can see on your machine.
 
 ## License
 

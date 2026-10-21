@@ -14,6 +14,14 @@ public struct PlayerState {
     public var isRunning: Bool = false
     public var error: String?
 
+    // Current queue, filled only while a playlist panel is open.
+    public var playlistName: String = ""
+    public var playlistRows: [PlaylistRow] = []
+    public var playlistTotal: Int = 0
+    public var playlistCurrent: Int = 0
+    public var playlistStart: Int = 0
+    public var playlistOffset: Int = 0
+
     public init() {}
 
     public var progress: Double {
@@ -33,6 +41,15 @@ public enum MediaAction: Equatable {
     case seek(Double)            // absolute seconds
     case seekFraction(Double)    // 0...1
     case volume(Double)          // 0...1
+    case playTrack(Int)          // absolute index in the current playlist
+    case shuffle
+    case repeatMode
+    case openView(String)        // exact view id, from theme.openView
+    case openPanel(String)       // preference token, e.g. "pl" from remoteCallPl
+    case closePanel(String)      // token or view id
+    case returnToMain
+    case openMedia
+    case openURL(String)
     case closeWindow
     case minimizeWindow
     case ignore
