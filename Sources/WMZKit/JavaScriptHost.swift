@@ -308,16 +308,10 @@ public final class JavaScriptHost: NSObject {
         case "alphablend":
             if let value = number(raw) { node.alpha = CGFloat(max(0, min(255, value))) / 255 }
         case "value":
-            if let slider = node.slider {
-                guard let value = number(raw), value.isFinite else { break }
-                switch slider.target {
-                case .seek: delegate?.jsPerform(.seek(value))
-                case .volume: delegate?.jsPerform(.volume(value / 100))
-                case .balance, .unknown: break
-                }
-            } else {
-                node.textOverride = string
-            }
+            // As in WMP, assigning a slider's value only moves the thumb. Skins
+            // mirror `currentPosition` into it every second; seeking on that
+            // made playback skip back to the whole second.
+            if node.slider == nil { node.textOverride = string }
         case "backgroundimage":
             node.backgroundOverride = string
         case "image":

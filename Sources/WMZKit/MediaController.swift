@@ -550,7 +550,11 @@ final class AppleScriptPlayer: PlayerBackend {
     }
 
     var isPlaying: Bool {
-        snapshot().isPlaying
+        guard isRunning else { return false }
+        let state = run("""
+        tell application "\(application)" to return (player state as string)
+        """, key: "state")
+        return state?.stringValue?.lowercased() == "playing"
     }
 
     func snapshot() -> PlayerState {
