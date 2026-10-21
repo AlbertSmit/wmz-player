@@ -283,9 +283,8 @@ private final class Builder {
         if signature.contains("shutter") && element["passthrough"]?.lowercased() == "true" {
             node.hidden = true
         }
-        if element["visible"]?.lowercased() == "false" {
-            node.hidden = true
-        }
+        // `visible="false"` is evaluated at draw time (ActionResolver.isVisible):
+        // the rating widget, for one, starts hidden and is revealed by state.
 
         if kind == .subview || kind == .view || kind == .group || kind == .button || kind == .video {
             layoutChildren(of: element, into: node, parentFrame: frame)

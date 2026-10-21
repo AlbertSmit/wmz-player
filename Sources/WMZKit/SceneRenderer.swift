@@ -54,8 +54,11 @@ public final class SceneRenderer {
         guard element.name == "subview" else { return 0 }
         // A subview that is nothing but artwork is frame decoration; WMP paints
         // those behind the subviews that actually hold content, whatever the
-        // z-index says.
-        let isPlainArtwork = element["backgroundimage"] != nil && element.children.isEmpty
+        // z-index says. Subviews that also set a background colour are real
+        // layers (they can be the skin's backdrop), so they keep their order.
+        let isPlainArtwork = element["backgroundimage"] != nil
+            && element.children.isEmpty
+            && element["backgroundcolor"] == nil
         return isPlainArtwork ? -1 : 0
     }
 

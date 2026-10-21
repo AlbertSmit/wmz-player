@@ -41,6 +41,7 @@ func previewState(playing: Bool) -> PlayerState {
     state.position = 87
     state.volume = 68
     state.backendName = "Preview"
+    if let raw = value("--rating"), let rating = Int(raw) { state.rating = rating }
     if ProcessInfo.processInfo.arguments.contains("--playlist") {
         state.playlistName = "Preview Queue"
         state.playlistRows = (1...10).map {

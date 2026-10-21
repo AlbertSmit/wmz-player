@@ -9,6 +9,8 @@ public struct PlayerState {
     public var position: Double = 0
     public var duration: Double = 0
     public var volume: Double = 60
+    /// 0–100 as the player reports it; nil when the player has no rating notion.
+    public var rating: Int?
     public var artworkPath: String?
     public var backendName: String = ""
     public var isRunning: Bool = false
@@ -42,6 +44,7 @@ public enum MediaAction: Equatable {
     case seekFraction(Double)    // 0...1
     case volume(Double)          // 0...1
     case playTrack(Int)          // absolute index in the current playlist
+    case setRating(Int)          // 0...100, from the skin's star buttons
     case shuffle
     case repeatMode
     case openView(String)        // exact view id, from theme.openView

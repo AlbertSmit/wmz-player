@@ -144,6 +144,14 @@ public final class MediaController {
         refreshNow()
     }
 
+    private func runAppleScript(_ source: String) {
+        guard let script = NSAppleScript(source: source) else { return }
+        var error: NSDictionary?
+        script.compileAndReturnError(&error)
+        _ = script.executeAndReturnError(&error)
+        if let error { NSLog("WMZPlayer: AppleScript failed: \(error)") }
+    }
+
     private func runSpotify(_ body: String) -> Bool {
         let script = """
         tell application "Spotify"
@@ -280,6 +288,10 @@ public final class MediaController {
             guard activeBackend().name == "Music" else { return }
             _ = PlaylistLoader.play(index: index, application: "Music")
 
+        case .setRating(let value):
+            guard activeBackend().name == "Music" else { return }
+            runAppleScript("tell application \"Music\" to set rating of current track to \(max(0, min(100, value)))")
+
         case .shuffle:
             switch activeBackend().name {
             case "Music": _ = PlaylistLoader.toggleShuffle(application: "Music")
@@ -352,14 +364,17 @@ final class AppleScriptPlayer: PlayerBackend {
                     set al to album of t
                     set d to ((duration of t) / \(durationUnit)) as integer
                     set p to (player position) as integer
+                    try
+                        set r to (rating of t) as integer
+                    end try
                 end try
             end if
             set v to (sound volume) as integer
-            return {s, n, a, al, d, p, v}
+            return {s, n, a, al, d, p, v, r}
         end tell
         """
 
-        guard let result = run(script, key: "snapshot"), result.numberOfItems >= 7 else { return state }
+        guard let result = run(script, key: "snapshot"), result.numberOfItems >= 8 else { return state }
         func field(_ index: Int) -> String {
             guard index <= result.numberOfItems else { return "" }
             return result.atIndex(index)?.stringValue ?? ""
@@ -372,6 +387,8 @@ final class AppleScriptPlayer: PlayerBackend {
         state.duration = Double(field(5)) ?? 0
         state.position = Double(field(6)) ?? 0
         state.volume = Double(field(7)) ?? 0
+        // Only Music exposes ratings; Spotify and Tidal leave this nil.
+        state.rating = application == "Music" ? (Int(field(8)) ?? 0) : nil
         state.hasTrack = !state.title.isEmpty
         lastVolume = state.volume
         return state

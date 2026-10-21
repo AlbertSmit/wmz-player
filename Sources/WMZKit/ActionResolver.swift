@@ -43,6 +43,9 @@ enum ActionResolver {
            let token = viewToken(from: preference[0]) {
             return .openPanel(token)
         }
+        if let value = quoted(after: "ratesong(", in: original), let rating = Int(value) {
+            return .setRating(rating)
+        }
         if script.contains("opendialog") || script.contains("openmediafile") { return .openMedia }
         if let url = quoted(after: "launchurl(", in: original) { return .openURL(url) }
         if script.contains("setmode") || script.contains("settings.getmode") {
@@ -154,6 +157,9 @@ enum ActionResolver {
     }
 
     static func isVisible(_ element: Element, state: PlayerState) -> Bool {
+        if let rating = state.rating, let override = ratingVisibility(element, rating: rating) {
+            return override
+        }
         guard let raw = element["visible"]?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
               !raw.isEmpty else { return true }
         if raw == "false" { return false }
@@ -164,6 +170,26 @@ enum ActionResolver {
         if raw.hasPrefix("wmpprop:") { return true }
         if let value = Expression.number(raw, lookup: { _ in 0 }) { return value != 0 }
         return true
+    }
+
+    /// WMP's rating widget is a stack of `rate1…5` (filled), `blankRate1…5`
+    /// (empty) and `autoRate1…5` buttons. The skin's script normally toggles
+    /// them; we drive them from the player's rating instead.
+    private static func ratingVisibility(_ element: Element, rating: Int) -> Bool? {
+        let id = element.id.lowercased()
+        let stars = Int((Double(max(0, min(100, rating))) / 20).rounded())
+        if id == "emptyrate" { return false }
+        if let slot = trailingNumber(id, prefix: "autorate") { _ = slot; return false }
+        if let slot = trailingNumber(id, prefix: "blankrate") { return slot > stars }
+        if let slot = trailingNumber(id, prefix: "rate") { return slot <= stars }
+        return nil
+    }
+
+    private static func trailingNumber(_ text: String, prefix: String) -> Int? {
+        guard text.hasPrefix(prefix) else { return nil }
+        let suffix = text.dropFirst(prefix.count)
+        guard !suffix.isEmpty, suffix.allSatisfy({ $0.isNumber }) else { return nil }
+        return Int(suffix)
     }
 
     static func isEnabled(_ command: String, state: PlayerState) -> Bool {
@@ -189,6 +215,16 @@ enum ActionResolver {
     static func text(for element: Element, state: PlayerState) -> String? {
         let value = element["value"] ?? ""
         let lowered = value.lowercased()
+
+        let identifier = element.id.lowercased()
+        // `locSomething` elements are strings the skin's script reads for
+        // tooltips and messages; WMP does not paint them.
+        if identifier.hasPrefix("loc") { return nil }
+        if identifier.contains("ratetext"), let rating = state.rating {
+            return rating == 0 ? "Rate Song" : "Rating"
+        }
+        // "test" is the placeholder several skins leave in their effect name.
+        if ["test", "placeholder", "lorem ipsum"].contains(lowered) { return "" }
 
         if !value.isEmpty {
             if lowered.hasPrefix("wmpprop:") || lowered.hasPrefix("jscript:") || lowered.hasPrefix("javascript:") {
