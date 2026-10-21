@@ -234,7 +234,17 @@ public final class JavaScriptHost: NSObject {
         case "visible":
             return node.visibleOverride ?? (node.element["visible"]?.lowercased() != "false")
         case "alphablend": return Int((node.alpha * 255).rounded())
-        case "value": return node.textOverride ?? node.element["value"] ?? ""
+        case "value":
+            // Sliders read their live value, not the wmpprop binding in the XML.
+            if let slider = node.slider {
+                switch slider.target {
+                case .seek: return state.position
+                case .volume: return state.volume
+                case .balance: return 0
+                case .unknown: return 0
+                }
+            }
+            return node.textOverride ?? node.element["value"] ?? ""
         case "backgroundimage": return node.backgroundOverride ?? node.element["backgroundimage"] ?? ""
         case "image": return node.imageOverride ?? node.element["image"] ?? ""
         case "enabled": return node.enabledOverride ?? (node.element["enabled"]?.lowercased() != "false")
@@ -261,7 +271,16 @@ public final class JavaScriptHost: NSObject {
         case "alphablend":
             if let value = number(raw) { node.alpha = CGFloat(max(0, min(255, value))) / 255 }
         case "value":
-            node.textOverride = string
+            if let slider = node.slider {
+                guard let value = number(raw), value.isFinite else { break }
+                switch slider.target {
+                case .seek: delegate?.jsPerform(.seek(value))
+                case .volume: delegate?.jsPerform(.volume(value / 100))
+                case .balance, .unknown: break
+                }
+            } else {
+                node.textOverride = string
+            }
         case "backgroundimage":
             node.backgroundOverride = string
         case "image":
@@ -274,7 +293,7 @@ public final class JavaScriptHost: NSObject {
     }
 
     fileprivate func alphaTo(_ id: String, _ value: Double, _ milliseconds: Double) {
-        guard let node = node(id) else { return }
+        guard let node = node(id), value.isFinite, milliseconds.isFinite else { return }
         let target = CGFloat(max(0, min(255, value))) / 255
         let duration = max(0, milliseconds) / 1000
         let start = node.alpha
@@ -285,7 +304,7 @@ public final class JavaScriptHost: NSObject {
     }
 
     fileprivate func moveTo(_ id: String, _ x: Double, _ y: Double, _ milliseconds: Double) {
-        guard let node = node(id) else { return }
+        guard let node = node(id), x.isFinite, y.isFinite, milliseconds.isFinite else { return }
         let from = node.frame.origin
         let to = CGPoint(x: x, y: y)
         let duration = max(0, milliseconds) / 1000
@@ -334,9 +353,12 @@ public final class JavaScriptHost: NSObject {
     }
 
     private func number(_ value: Any?) -> Double? {
-        if let number = value as? NSNumber { return number.doubleValue }
-        if let string = value as? String { return Double(string) }
-        return nil
+        let result: Double?
+        if let number = value as? NSNumber { result = number.doubleValue }
+        else if let string = value as? String { result = Double(string) }
+        else { result = nil }
+        guard let result, result.isFinite else { return nil }
+        return result
     }
 
     private func bool(_ value: Any?) -> Bool? {

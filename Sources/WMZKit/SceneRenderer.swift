@@ -232,6 +232,8 @@ public final class SceneRenderer {
     }
 
     private func drawText(_ node: SceneNode, state: PlayerState, ctx: CGContext) {
+        guard node.frame.origin.x.isFinite, node.frame.origin.y.isFinite,
+              node.frame.width.isFinite, node.frame.height.isFinite else { return }
         let resolved = node.textOverride ?? ActionResolver.text(for: node.element, state: state)
         guard let string = resolved, !string.isEmpty else { return }
         let size = node.element.int("fontsize").map { CGFloat($0) } ?? 11
@@ -316,6 +318,7 @@ public final class SceneRenderer {
     // MARK: - Playlist
 
     private func drawPlaylist(_ node: SceneNode, state: PlayerState, ctx: CGContext) {
+        guard node.frame.origin.x.isFinite, node.frame.width.isFinite else { return }
         guard let info = node.playlist else { return }
         let frame = node.frame
         guard frame.width > 4, frame.height > 4 else { return }

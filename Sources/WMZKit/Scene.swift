@@ -121,13 +121,15 @@ public final class SceneNode {
     /// Children are laid out in absolute coordinates, so moving a container has
     /// to carry its subtree with it.
     public func move(by delta: CGSize) {
-        guard delta != .zero else { return }
+        guard delta.width.isFinite, delta.height.isFinite, delta != .zero else { return }
+        guard frame.origin.x.isFinite, frame.origin.y.isFinite else { return }
         frame.origin.x += delta.width
         frame.origin.y += delta.height
         for child in children { child.move(by: delta) }
     }
 
     public func setSize(_ size: CGSize) {
+        guard size.width.isFinite, size.height.isFinite else { return }
         frame.size = CGSize(width: max(0, size.width), height: max(0, size.height))
     }
 
