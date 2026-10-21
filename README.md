@@ -60,7 +60,7 @@ actually running.
 
 ## Install
 
-There is no notarised binary yet. [Release v0.1-alpha](https://github.com/AlbertSmit/wmz-player/releases)
+There is no notarised binary yet. [Release v0.2-alpha](https://github.com/AlbertSmit/wmz-player/releases)
 has a zipped build; because it is ad-hoc signed, macOS quarantines it. Either
 right-click the app and choose **Open**, or clear the flag once:
 
