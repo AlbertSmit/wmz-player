@@ -64,7 +64,7 @@ actually running.
 
 ## Install
 
-There is no notarised binary yet. [Release v0.2-alpha](https://github.com/AlbertSmit/wmz-player/releases)
+There is no notarised binary yet. [Release v0.3-alpha](https://github.com/AlbertSmit/wmz-player/releases)
 has a zipped build; because it is ad-hoc signed, macOS quarantines it. Either
 right-click the app and choose **Open**, or clear the flag once:
 
@@ -130,13 +130,12 @@ and stops, but the title area stays empty and the seek slider is inert.
 ```sh
 wmz inspect  <skin.wmz>                  # views, controls, resolved actions
 wmz render   <skin.wmz> --out preview.png
-             [--scale 2] [--on 202020] [--view <id>] [--playing]
+             [--scale 2] [--on 202020] [--view <id>] [--playing] [--spectrum]
 wmz hit      <skin.wmz> --at 230,190 [--view <id>]
 wmz media    [--target music|spotify|tidal|auto] [--seconds <n>]
              [--bundle <fragment>]       # read any app through Now Playing
-wmz queue                                # the current Music queue window
-wmz audio [--bundle com.apple.Music]     # live FFT bands (visualizer input)
-wmz queue --center <index>               # page around an arbitrary row
+wmz queue    [--center <index>]          # current queue, or page around a row
+wmz audio    [--bundle com.apple.Music]  # live FFT bands (visualizer input)
 ```
 
 `render --on <hex>` fills the background first, which is the only sane way to
@@ -170,7 +169,7 @@ The renderer supports the parts that carry the look of a skin:
 | Controls | `<button>` normal/hover/down states, `<buttongroup>` with `mappingImage` zones |
 | Sliders | `<customSlider>` sprite strips; direction fitted from the artwork |
 | Playlist | `<playlist>` columns, colours and status line, filled from Music's queue |
-| Effects | `<effects>` shows album art, or FFT bars when the visualizer is on |
+| Effects | `<effects>` shows album art, or one of four FFT shapes when the visualizer is on |
 | Animation | multi-frame GIF artwork plays at the file's own frame rate |
 | Script | the view's `scriptFile` runs in JavaScriptCore against a WMP-shaped object model |
 | Text | font, size, colour, justification, `wmpprop:` bindings, title/artist/time |
@@ -207,19 +206,21 @@ Tested against the 175-skin Windows Media Player archive: **171 load and
 render**. The four failures are three Windows installers that were distributed
 with a `.wmz` extension and one damaged ZIP.
 
-Skins that build their interface from JScript at runtime — Microsoft's own
-*9 Series Default* is the clearest example — render only their static parts.
+Skins that build their interface from JScript at runtime — Batman Begins is the
+clearest example — now lay themselves out and animate through the script host.
+Where a skin needs an API we only stub, it degrades to its static parts.
 
 ### Known limits
 
 - The script host implements the common WMP API, not all of it: playlist column
-  APIs and visualisation stepping are stubs, and unsupported calls are logged
-  and ignored.
-- Skins that rely on WMP's hidden `controlView` polling now navigate through a
+  APIs are stubs, and unsupported calls are logged and ignored.
+- Skins that rely on WMP's hidden `controlView` polling navigate through a
   fallback in the app; preference handshakes that need real cross-view state may
   still differ.
-- Each view runs its own context, so globals are not shared between the main
-  window and its panels.
+- Each view has its own JS context. Element ids are shared through a registry,
+  but variables declared by one view's script are not visible to another's.
+- A few skins reference ids or helpers that do not exist in their own package;
+  those handlers throw once and the rest of the skin keeps working.
 - The playlist pages in another window of rows near the edges and caches the
   last few windows, so reversing direction is instant; it is not an endless
   virtual list.
@@ -229,7 +230,6 @@ Skins that build their interface from JScript at runtime — Microsoft's own
   without a virtual audio device in the signal path.
 - The visualizer needs macOS 14.2+ (CoreAudio process taps); on older systems
   `<effects>` keeps showing album art.
-- Skins whose layout is produced by their JScript still render statically.
 - The renderer is intentionally a subset of WMP's UI vocabulary. If a skin looks
   wrong, `wmz inspect` will usually show why.
 
@@ -277,9 +277,10 @@ scripts/make-icon.swift  .icon → .icns
 
 ```sh
 swift build                 # engine + app + CLI
-swift test                  # layout, XML, action and hit-testing tests
+swift test                  # 66 layout, XML, action and hit-testing tests
 swift build -c release
 ./scripts/build-app.sh      # bundle in dist/
+./scripts/skin-sweep.sh     # compatibility table, launches headless
 swift scripts/make-icon.swift Resources/AppIcon.icon Resources/AppIcon.icns
 ```
 
