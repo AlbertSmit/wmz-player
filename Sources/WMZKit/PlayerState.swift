@@ -56,6 +56,18 @@ public enum MediaAction: Equatable {
     case closeWindow
     case minimizeWindow
     case ignore
+
+    /// Actions the app must still handle even when the skin's script ran: some
+    /// skins only record a preference that a hidden controller view polls.
+    public var isNavigation: Bool {
+        switch self {
+        case .openView, .openPanel, .closePanel, .returnToMain,
+             .openMedia, .openURL, .closeWindow, .minimizeWindow:
+            return true
+        default:
+            return false
+        }
+    }
 }
 
 public enum SliderTarget: Equatable {

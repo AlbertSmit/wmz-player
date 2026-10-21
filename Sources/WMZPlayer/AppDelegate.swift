@@ -9,13 +9,20 @@ final class SkinWindow: NSWindow {
 }
 
 /// One open skin view: its window, its scene and its canvas.
-final class ViewWindow: NSObject, NSWindowDelegate {
+final class ViewWindow: NSObject, NSWindowDelegate, JavaScriptHostDelegate {
     let viewID: String
     let isMain: Bool
     let window: SkinWindow
     let view: SkinView
     private(set) var scene: Scene
     private var scale: CGFloat
+    private var jsHost: JavaScriptHost?
+
+    var onOpenView: ((String) -> Void)?
+    var onCloseView: ((String) -> Void)?
+    var onReturnToMain: (() -> Void)?
+    var onOpenDialog: (() -> Void)?
+    var onPlaySound: ((String) -> Void)?
 
     init(scene: Scene, viewID: String, isMain: Bool, scale: CGFloat) {
         self.scene = scene
@@ -40,11 +47,46 @@ final class ViewWindow: NSObject, NSWindowDelegate {
         window.title = scene.title
         super.init()
         window.delegate = self
+        startScript()
+    }
+
+    private func startScript() {
+        let host = JavaScriptHost(scene: scene, delegate: self)
+        jsHost = host
+        host.start()
+
+        view.onScriptClick = { [weak self] node, action in
+            guard let self else { return false }
+            let scripted = node.element["onclick"].map { self.jsHost?.call($0) ?? false } ?? false
+            if let action, action.isNavigation { return false }
+            return scripted
+        }
+        view.onHoverScript = { [weak self] node, entered in
+            guard let host = self?.jsHost else { return }
+            if let script = node.element[entered ? "onmouseover" : "onmouseout"] { _ = host.call(script) }
+        }
+        view.onKeyScript = { [weak self] code in
+            guard let self, let host = self.jsHost,
+                  let script = self.scene.view["onkeypress"] else { return }
+            host.setEventKey(Int(code))
+            _ = host.call(script)
+        }
     }
 
     func apply(_ state: PlayerState) {
         view.update(state: state)
+        jsHost?.update(state)
     }
+
+    // MARK: - JavaScriptHostDelegate
+
+    func jsPerform(_ action: MediaAction) { view.onAction?(action) }
+    func jsOpenView(_ id: String) { onOpenView?(id) }
+    func jsCloseView(_ id: String) { onCloseView?(id) }
+    func jsReturnToMediaCenter() { onReturnToMain?() }
+    func jsOpenDialog() { onOpenDialog?() }
+    func jsPlaySound(_ name: String) { onPlaySound?(name) }
+    func jsNeedsDisplay() { view.needsDisplay = true }
 
     func setScale(_ newScale: CGFloat) {
         scale = newScale
@@ -196,6 +238,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         controller.view.onContextMenu = { [weak self] event in self?.showContextMenu(event) }
         controller.view.onSound = { [weak self] name in self?.playSound(name, from: viewID) }
         controller.view.onPlaylistScroll = { [weak self] rows in self?.media.scrollPlaylist(by: rows) }
+        controller.onOpenView = { [weak self] id in self?.openPanelView(id) }
+        controller.onCloseView = { [weak self, weak controller] id in
+            guard let self, let controller else { return }
+            if let resolved = self.resolveViewID(id) {
+                self.closePanel(resolved)
+            } else {
+                self.closePanel(controller.viewID)
+            }
+        }
+        controller.onReturnToMain = { [weak self] in
+            self?.main?.window.makeKeyAndOrderFront(nil)
+        }
+        controller.onOpenDialog = { [weak self] in self?.pickMediaFile() }
+        controller.onPlaySound = { [weak self] name in
+            self?.playSound(name, from: controller.viewID)
+        }
     }
 
     private func closeAll() {

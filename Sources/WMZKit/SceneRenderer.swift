@@ -42,7 +42,7 @@ public final class SceneRenderer {
         }.map { $0.element }
 
         for child in ordered {
-            guard !child.hidden, ActionResolver.isVisible(child.element, state: state) else { continue }
+            guard !child.hidden, child.isVisible(state) else { continue }
             draw(node: child, state: state, hovered: hovered, pressed: pressed, ctx: ctx)
         }
     }
@@ -64,11 +64,23 @@ public final class SceneRenderer {
 
     private func draw(node: SceneNode, state: PlayerState,
                       hovered: SceneNode?, pressed: SceneNode?, ctx: CGContext) {
+        if node.alpha < 1 {
+            ctx.saveGState()
+            ctx.setAlpha(node.alpha)
+            drawContents(node: node, state: state, hovered: hovered, pressed: pressed, ctx: ctx)
+            ctx.restoreGState()
+            return
+        }
+        drawContents(node: node, state: state, hovered: hovered, pressed: pressed, ctx: ctx)
+    }
+
+    private func drawContents(node: SceneNode, state: PlayerState,
+                              hovered: SceneNode?, pressed: SceneNode?, ctx: CGContext) {
         switch node.kind {
         case .view, .subview:
             ctx.saveGState()
             ctx.clip(to: node.frame)
-            drawBackground(of: node.element, in: node.frame, ctx: ctx)
+            drawBackground(of: node.element, in: node.frame, ctx: ctx, override: node.backgroundOverride)
             drawChildren(of: node, state: state, hovered: hovered, pressed: pressed, ctx: ctx)
             ctx.restoreGState()
 
@@ -113,12 +125,12 @@ public final class SceneRenderer {
         ctx.restoreGState()
     }
 
-    private func drawBackground(of element: Element, in frame: CGRect, ctx: CGContext) {
+    private func drawBackground(of element: Element, in frame: CGRect, ctx: CGContext, override: String? = nil) {
         if let colour = RGB(hex: element["backgroundcolor"]) {
             ctx.setFillColor(colour.color)
             ctx.fill(frame)
         }
-        guard let name = element["backgroundimage"] else { return }
+        guard let name = override ?? element.backgroundImage else { return }
         if let animation = assets.animation(named: name) {
             lastFrameAnimated = true
             drawImage(animation.frame(at: CACurrentMediaTime()), in: frame, ctx: ctx)
@@ -148,7 +160,7 @@ public final class SceneRenderer {
 
     private func drawButton(_ node: SceneNode, state: PlayerState,
                             hovered: SceneNode?, pressed: SceneNode?, ctx: CGContext) {
-        var name = node.element["image"]
+        var name = node.imageOverride ?? node.element.image
         if pressed === node, let down = node.element["downimage"] { name = down }
         else if hovered === node, let hover = node.element["hoverimage"] { name = hover }
 
@@ -157,8 +169,7 @@ public final class SceneRenderer {
             frame.origin.x += offset
         }
 
-        let blend = node.element.int("alphablend").map { CGFloat($0) / 255 } ?? 1
-        guard blend > 0 else { return }
+        guard node.alpha > 0 else { return }
 
         let image: CGImage?
         if let animation = assets.animation(named: name) {
@@ -169,10 +180,7 @@ public final class SceneRenderer {
         }
         guard let image else { return }
 
-        ctx.saveGState()
-        ctx.setAlpha(blend)
         drawImage(image, in: frame, ctx: ctx)
-        ctx.restoreGState()
     }
 
     /// The `time1`..`time4` controls in many skins are 10-digit strips that the
@@ -194,7 +202,7 @@ public final class SceneRenderer {
     }
 
     private func drawGroup(_ node: SceneNode, hovered: SceneNode?, pressed: SceneNode?, ctx: CGContext) {
-        var name = node.element["image"]
+        var name = node.imageOverride ?? node.element.image
         if pressed === node, let down = node.element["downimage"] { name = down }
         else if hovered === node, let hover = node.element["hoverimage"] { name = hover }
         guard let image = assets.keyed(named: name, colours: node.element.keyColours) else { return }
@@ -224,7 +232,8 @@ public final class SceneRenderer {
     }
 
     private func drawText(_ node: SceneNode, state: PlayerState, ctx: CGContext) {
-        guard let string = ActionResolver.text(for: node.element, state: state), !string.isEmpty else { return }
+        let resolved = node.textOverride ?? ActionResolver.text(for: node.element, state: state)
+        guard let string = resolved, !string.isEmpty else { return }
         let size = node.element.int("fontsize").map { CGFloat($0) } ?? 11
         let face = node.element["fontface"] ?? "Helvetica"
         let style = node.element["fontstyle"] ?? ""

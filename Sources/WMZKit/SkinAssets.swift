@@ -106,16 +106,21 @@ public struct ImageAnimation {
     public let frames: [CGImage]
     public let durations: [TimeInterval]
     public let totalDuration: TimeInterval
+    /// 0 means loop forever; 1 (the GIF default) plays once and holds the last
+    /// frame — shutter and intro animations rely on that.
+    public let loopCount: Int
 
-    init(frames: [CGImage], durations: [TimeInterval]) {
+    init(frames: [CGImage], durations: [TimeInterval], loopCount: Int) {
         self.frames = frames
         self.durations = durations
         self.totalDuration = durations.reduce(0, +)
+        self.loopCount = loopCount
     }
 
     /// Frame index for a monotonically increasing time (seconds).
     public func frame(at time: TimeInterval) -> CGImage {
         guard totalDuration > 0, frames.count > 1 else { return frames[0] }
+        if loopCount != 0, time >= totalDuration { return frames[frames.count - 1] }
         var offset = time.truncatingRemainder(dividingBy: totalDuration)
         if offset < 0 { offset += totalDuration }
         var elapsed: TimeInterval = 0
@@ -149,7 +154,11 @@ public final class SkinAssets {
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalised.isEmpty else { return nil }
         if files == nil { indexFiles() }
-        return files?[normalised.lowercased()]
+        if let exact = files?[normalised.lowercased()] { return exact }
+        // Some skins reference "png8/intro_f1.png" for files that were packed at
+        // the archive root; fall back to the file name.
+        let base = (normalised as NSString).lastPathComponent
+        return files?[base.lowercased()]
     }
 
     private func indexFiles() {
@@ -214,7 +223,10 @@ public final class SkinAssets {
                     durations.append(frameDuration(properties))
                 }
                 if frames.count > 1 {
-                    animation = ImageAnimation(frames: frames, durations: durations)
+                    let sourceProperties = CGImageSourceCopyProperties(source, nil) as? [CFString: Any] ?? [:]
+                    let gif = sourceProperties[kCGImagePropertyGIFDictionary] as? [CFString: Any]
+                    let loops = gif?[kCGImagePropertyGIFLoopCount] as? Int ?? 1
+                    animation = ImageAnimation(frames: frames, durations: durations, loopCount: loops)
                 }
             }
         }

@@ -274,6 +274,10 @@ enum ActionResolver {
 extension Element {
     public var id: String { self["id"] ?? "" }
 
+    /// Runtime-overridable artwork/geometry.
+    var backgroundImage: String? { self["backgroundimage"] }
+    var image: String? { self["image"] }
+
     /// WMP skins key artwork to a colour so a rectangular bitmap can have an
     /// irregular, click-through outline. Magenta is the format's default key.
     /// Candidate key colours, most specific first. WMP7's `clippingColor` and

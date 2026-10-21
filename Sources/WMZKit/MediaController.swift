@@ -307,7 +307,7 @@ public final class MediaController {
             }
 
         case .openView, .openPanel, .closePanel, .returnToMain, .openMedia, .openURL,
-             .closeWindow, .minimizeWindow, .ignore:
+             .closeWindow, .minimizeWindow:
             return
         }
 

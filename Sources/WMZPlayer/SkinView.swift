@@ -20,6 +20,9 @@ final class SkinView: NSView {
     var onContextMenu: ((NSEvent) -> Void)?
     var onPlaylistScroll: ((Int) -> Void)?
     var onSound: ((String) -> Void)?
+    var onScriptClick: ((SceneNode, MediaAction?) -> Bool)?
+    var onHoverScript: ((SceneNode, Bool) -> Void)?
+    var onKeyScript: ((UInt16) -> Void)?
 
     private(set) var hovered: SceneNode?
     private var pressed: SceneNode?
@@ -70,6 +73,8 @@ final class SkinView: NSView {
         guard let scene else { return }
         let node = scene.node(at: scenePoint(event), state: state)
         guard node !== hovered else { return }
+        if let previous = hovered { onHoverScript?(previous, false) }
+        if let node { onHoverScript?(node, true) }
         hovered = node
         needsDisplay = true
         if let node {
@@ -146,6 +151,17 @@ final class SkinView: NSView {
         // Fire only when released over the same control. Group hit zones carry
         // their action, so ask the scene again instead of reading node.action.
         let point = scenePoint(event)
+        let hitAction: MediaAction?
+        if case .action(let action, let hitNode) = scene.hitTest(point, state: state), hitNode === node {
+            hitAction = action
+        } else {
+            hitAction = nil
+        }
+
+        // The skin's own handler runs first; navigation still goes through the
+        // app (some skins only record a preference for another view to poll).
+        if let onScriptClick, onScriptClick(node, hitAction) { return }
+
         if let sound = node.sound { onSound?(sound) }
         switch scene.hitTest(point, state: state) {
         case .action(let action, let hitNode) where hitNode === node:
@@ -195,6 +211,7 @@ final class SkinView: NSView {
     }
 
     override func keyDown(with event: NSEvent) {
+        onKeyScript?(event.keyCode)
         switch event.keyCode {
         case 49: onAction?(.playPause)            // space
         case 123: onAction?(.seek(state.position - 5))

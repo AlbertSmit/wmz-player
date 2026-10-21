@@ -91,6 +91,14 @@ public final class SceneNode {
     public var zIndex: Int = 0
     public var hidden = false
 
+    // Runtime state, driven by the skin's own script.
+    public var visibleOverride: Bool?
+    public var alpha: CGFloat = 1
+    public var textOverride: String?
+    public var backgroundOverride: String?
+    public var imageOverride: String?
+    public var enabledOverride: Bool?
+
     public var id: String { element.id }
     public var keyColours: [RGB] { element.keyColours }
 
@@ -98,6 +106,29 @@ public final class SceneNode {
         self.element = element
         self.kind = kind
         self.frame = frame
+    }
+
+    public func isVisible(_ state: PlayerState) -> Bool {
+        if let visibleOverride { return visibleOverride }
+        return ActionResolver.isVisible(element, state: state)
+    }
+
+    public func isEnabled(_ state: PlayerState) -> Bool {
+        if let enabledOverride { return enabledOverride }
+        return ActionResolver.isInteractive(element)
+    }
+
+    /// Children are laid out in absolute coordinates, so moving a container has
+    /// to carry its subtree with it.
+    public func move(by delta: CGSize) {
+        guard delta != .zero else { return }
+        frame.origin.x += delta.width
+        frame.origin.y += delta.height
+        for child in children { child.move(by: delta) }
+    }
+
+    public func setSize(_ size: CGSize) {
+        frame.size = CGSize(width: max(0, size.width), height: max(0, size.height))
     }
 
     public var hasBehaviour: Bool {
@@ -113,6 +144,8 @@ public struct Scene {
     public let title: String
     public let background: RGB?
     public let document: SkinDocument
+    /// Every identifiable node, lowercased id -> node, for the script host.
+    public let nodes: [String: SceneNode]
 
     public init(view: Element, root: SceneNode, size: CGSize, assets: SkinAssets,
                 title: String, document: SkinDocument) {
@@ -123,6 +156,15 @@ public struct Scene {
         self.title = title
         self.background = RGB(hex: view["backgroundcolor"])
         self.document = document
+
+        var map: [String: SceneNode] = [:]
+        func collect(_ node: SceneNode) {
+            let key = node.id.lowercased()
+            if !key.isEmpty, map[key] == nil { map[key] = node }
+            for child in node.children { collect(child) }
+        }
+        collect(root)
+        self.nodes = map
     }
 }
 
@@ -253,6 +295,7 @@ private final class Builder {
 
         let node = SceneNode(element: element, kind: kind, frame: frame)
         node.zIndex = element.int("zindex") ?? 0
+        if let blend = element.int("alphablend") { node.alpha = CGFloat(blend) / 255 }
 
         if !element.id.isEmpty {
             frames[element.id.lowercased()] = frame
@@ -278,9 +321,11 @@ private final class Builder {
         }
 
         // The intro shutter is a full-window overlay that the skin's script
-        // animates away on load. We render the skin at rest, without it.
+        // animates away on load. Without a script we never see it open, so only
+        // scripts that cannot drive it get the overlay hidden up front.
         let signature = (element.id + " " + (element["backgroundimage"] ?? "")).lowercased()
-        if signature.contains("shutter") && element["passthrough"]?.lowercased() == "true" {
+        if signature.contains("shutter"), element["passthrough"]?.lowercased() == "true",
+           self.view["scriptfile"] == nil {
             node.hidden = true
         }
         // `visible="false"` is evaluated at draw time (ActionResolver.isVisible):
@@ -528,8 +573,7 @@ extension Scene {
 
         for node in nodes.reversed() {
             guard node.hasBehaviour, node.frame.contains(point), !node.hidden else { continue }
-            guard ActionResolver.isVisible(node.element, state: state),
-                  ActionResolver.isInteractive(node.element) else { continue }
+            guard node.isVisible(state), node.isEnabled(state) else { continue }
 
             switch node.kind {
             case .slider:

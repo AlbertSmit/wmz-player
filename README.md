@@ -39,8 +39,11 @@ actually running.
   buttons included.
 - **A real playlist.** The `<playlist>` control is drawn with the skin's own
   columns and colours and filled from the Music queue; click a row to play it.
+- **The skin's own script runs.** A JavaScriptCore host implements WMP's object
+  model, so skins that build themselves at runtime — Batman Begins, 9 Series
+  Default — lay out, animate and respond as designed.
 - **Animated GIFs and click sounds.** Multi-frame artwork animates at its own
-  rate, and `theme.playSound` effects play.
+  rate, honours play-once animations, and `theme.playSound` effects play.
 - **The whole button map:** transport, mute, shuffle/repeat, volume, seek,
   panel open/close, file picker, URLs, close and minimize.
 - **Apple Music, Spotify and Tidal**, chosen automatically or pinned in the menu.
@@ -160,12 +163,29 @@ The renderer supports the parts that carry the look of a skin:
 | Playlist | `<playlist>` columns and colours, filled from Music's queue |
 | Effects | `<effects>` hosts album art for now (our own visualizer is next) |
 | Animation | multi-frame GIF artwork plays at the file's own frame rate |
+| Script | the view's `scriptFile` runs in JavaScriptCore against a WMP-shaped object model |
 | Text | font, size, colour, justification, `wmpprop:` bindings, title/artist/time |
 | Video | `<video>` becomes the current track's artwork |
 
-Commands are resolved in order: the semantic element (`playelement`,
-`nextelement`, …), the `onClick` script text (`player.controls.next()`), then
-the control's id or image name (`m_pause_no.png`).
+Commands are resolved in order: the skin's own `onClick` handler (run in the
+script host), then the semantic element (`playelement`, `nextelement`, …), then
+the `onClick` text parsed as a command, then the control's id or image name
+(`m_pause_no.png`).
+
+### The script host
+
+Each view gets a `JSContext` with the skin's globals: every element id is a
+global object with `left`/`top`/`width`/`height`/`visible`/`alphaBlend`/`value`/
+`backgroundImage`/`image`/`toolTip`, plus `alphaBlendTo` and `moveTo` (animated
+at 30 fps). `player`, `theme`, `view`, `eq` and `mediacenter` mirror WMP's
+objects: transport, volume/mute/shuffle/repeat, item info, preferences, panel
+navigation, sounds and the file dialog. `onLoad`, `onTimer`, `onClick`,
+`onMouseOver/Out`, `onKeyPress` and the player state-change handlers all fire;
+APIs are matched case-insensitively because skins are inconsistent about it.
+
+Element properties set by the script override the XML: visibility is evaluated
+at draw time, artwork and text can be swapped per frame, and moves carry their
+subtree with them.
 
 AppleScript drives Music and Spotify. Writes to the player (seek, volume) are
 coalesced: Music can apply overlapping `set` events out of order and drop the
@@ -182,9 +202,15 @@ Skins that build their interface from JScript at runtime — Microsoft's own
 
 ### Known limits
 
-- The skin's JScript is **not** executed.
-- Playlists, equalizer, visualizations, video surfaces and entrance animations
-  are ignored; skin sound effects are not played.
+- The script host implements the common WMP API, not all of it: playlist column
+  APIs and visualisation stepping are stubs, and unsupported calls are logged
+  and ignored.
+- Skins that rely on WMP's hidden `controlView` polling now navigate through a
+  fallback in the app; preference handshakes that need real cross-view state may
+  still differ.
+- Each view runs its own context, so globals are not shared between the main
+  window and its panels.
+- There is no execution-time cap on a skin's script yet.
 - Tidal's metadata and seeking depend on the macOS build (see [Players](#players)).
 - The playlist panel loads the dozen or so rows around the current track; it is
   not an endless list, and only Music exposes a queue.
@@ -223,6 +249,7 @@ Sources/WMZKit/          engine
   PlaylistLoader.swift   Music queue + shuffle/repeat/file open
   ActionResolver.swift   WMP commands → MediaAction
   MediaController.swift  AppleScript backends
+  JavaScriptHost.swift   JavaScriptCore host + WMP object model
   SystemNowPlaying.swift MediaRemote bridge + Tidal
 Sources/WMZPlayer/       AppKit app (window, menu, input)
 Sources/wmz/             CLI

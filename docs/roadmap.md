@@ -54,7 +54,7 @@ elements that are already handled. The unhandled bulk is `launchURL` (486),
 - **Album art in `<effects>`.** Use the current track's artwork as the visualizer
   fallback so that panel is not empty.
 
-## Phase 2 — run the skin's JavaScript
+## Phase 2 — run the skin's JavaScript (implemented on `feature/phase-2-js`)
 
 Embed JavaScriptCore and expose the WMP object model the skins expect:
 `player.controls`, `player.settings`, `player.currentMedia`, `player.currentPlaylist`,
