@@ -144,6 +144,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
     private var redrawTimer: Timer?
     private var audioSpectrum: AudioSpectrum?
     private var spectrumBackend: String?
+    private var lastSpectrumAttempt = Date.distantPast
     private var latestBands: [Float]?
     private var visualizerStyle = 0
 
@@ -267,8 +268,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
             return
         }
 
+        // Every tap attempt reroutes the player's audio in coreaudiod, so a
+        // failing start() must not be retried on every 15 fps tick.
         let backend = media.currentBackendName
-        if audioSpectrum?.isRunning != true || spectrumBackend != backend {
+        let retryDue = audioSpectrum == nil && Date().timeIntervalSince(lastSpectrumAttempt) > 5
+        if spectrumBackend != backend || retryDue {
+            lastSpectrumAttempt = Date()
             audioSpectrum?.stop()
             audioSpectrum = nil
             spectrumBackend = backend

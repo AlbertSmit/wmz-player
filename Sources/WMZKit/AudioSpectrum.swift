@@ -66,11 +66,23 @@ public final class AudioSpectrum {
             return false
         }
 
+        guard let outputUID = Self.defaultOutputUID() else {
+            AudioHardwareDestroyProcessTap(tapID)
+            tapID = 0
+            return false
+        }
+        // Clocking the aggregate from the real output device keeps the tap in
+        // step with playback instead of drifting against it.
         let aggregate: [String: Any] = [
             kAudioAggregateDeviceNameKey: "WMZPlayer Visualizer",
             kAudioAggregateDeviceUIDKey: UUID().uuidString,
             kAudioAggregateDeviceIsPrivateKey: 1,
-            kAudioAggregateDeviceTapListKey: [[kAudioSubTapUIDKey: description.uuid.uuidString]]
+            kAudioAggregateDeviceMainSubDeviceKey: outputUID,
+            kAudioAggregateDeviceSubDeviceListKey: [[kAudioSubDeviceUIDKey: outputUID]],
+            kAudioAggregateDeviceTapListKey: [[
+                kAudioSubTapUIDKey: description.uuid.uuidString,
+                kAudioSubTapDriftCompensationKey: 1
+            ]]
         ]
         guard AudioHardwareCreateAggregateDevice(aggregate as CFDictionary, &aggregateID) == noErr else {
             AudioHardwareDestroyProcessTap(tapID)
@@ -131,14 +143,17 @@ public final class AudioSpectrum {
     // MARK: - Realtime capture
 
     private func capture(_ input: UnsafePointer<AudioBufferList>) {
+        // The tap's stream follows any input streams of the output device.
         let buffers = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: input))
-        guard let first = buffers.first, let data = first.mData else { return }
-        let channelCount = max(1, Int(first.mNumberChannels))
-        let frames = Int(first.mDataByteSize) / (MemoryLayout<Float>.size * channelCount)
+        guard let tap = buffers.last, let data = tap.mData else { return }
+        let channelCount = max(1, Int(tap.mNumberChannels))
+        let frames = Int(tap.mDataByteSize) / (MemoryLayout<Float>.size * channelCount)
         guard frames > 0 else { return }
         let samples = data.bindMemory(to: Float.self, capacity: frames * channelCount)
 
-        lock.lock()
+        // Never block the realtime thread; a dropped buffer only costs the
+        // visualizer one frame.
+        guard lock.try() else { return }
         var index = writeIndex
         for frame in 0..<frames {
             var sum: Float = 0
@@ -252,6 +267,23 @@ public final class AudioSpectrum {
             }
         }
         return nil
+    }
+
+    private static func defaultOutputUID() -> String? {
+        var address = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+                                                mScope: kAudioObjectPropertyScopeGlobal,
+                                                mElement: kAudioObjectPropertyElementMain)
+        var device = AudioObjectID(0)
+        var size = UInt32(MemoryLayout<AudioObjectID>.size)
+        guard AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size, &device) == noErr,
+              device != 0 else { return nil }
+
+        address.mSelector = kAudioDevicePropertyDeviceUID
+        var uid: Unmanaged<CFString>?
+        size = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
+        guard AudioObjectGetPropertyData(device, &address, 0, nil, &size, &uid) == noErr,
+              let uid else { return nil }
+        return uid.takeRetainedValue() as String
     }
 
     private static func streamChannels(device: AudioObjectID) -> Int? {
