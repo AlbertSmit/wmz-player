@@ -30,6 +30,7 @@ final class ViewWindow: NSObject, NSWindowDelegate, JavaScriptHostDelegate {
     var onReturnToMain: (() -> Void)?
     var onOpenDialog: (() -> Void)?
     var onPlaySound: ((String) -> Void)?
+    var onMoved: ((CGPoint) -> Void)?
 
     init(scene: Scene, viewID: String, isMain: Bool, scale: CGFloat,
          registry: [String: SceneNode]) {
@@ -106,6 +107,10 @@ final class ViewWindow: NSObject, NSWindowDelegate, JavaScriptHostDelegate {
     func jsPlaySound(_ name: String) { onPlaySound?(name) }
     func jsNeedsDisplay() { view.needsDisplay = true }
 
+    func windowDidMove(_ notification: Notification) {
+        onMoved?(window.frame.origin)
+    }
+
     func setScale(_ newScale: CGFloat) {
         scale = newScale
         let size = CGSize(width: scene.size.width * newScale, height: scene.size.height * newScale)
@@ -115,7 +120,7 @@ final class ViewWindow: NSObject, NSWindowDelegate, JavaScriptHostDelegate {
     }
 }
 
-final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, NSMenuDelegate {
     private let media = MediaController()
     private let sounds = SoundPlayer()
 
@@ -123,6 +128,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private var loadedURL: URL?
 
     private let recentMenu = NSMenu(title: "Open Recent")
+    private let skinsMenu = NSMenu(title: "Skins")
     private static let recentKey = "recentSkins"
     private var recentSkins: [String] = UserDefaults.standard.stringArray(forKey: "recentSkins") ?? []
     /// Scenes are built once per view so panels open instantly and every script
@@ -140,6 +146,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private var spectrumBackend: String?
     private var latestBands: [Float]?
     private var visualizerStyle = 0
+
+    /// Test/sweep launches stay invisible: no activation, no drawing on screen.
+    private static let headless = CommandLine.arguments.contains("--headless")
+    private static let quiet = headless || CommandLine.arguments.contains("--no-activate")
+
+    private func present(_ window: NSWindow) {
+        if Self.headless {
+            window.alphaValue = 0
+            window.orderBack(nil)
+        } else {
+            window.makeKeyAndOrderFront(nil)
+        }
+    }
+    /// Loading a skin briefly closes every window; don't let AppKit treat that
+    /// as "the last window closed" and quit halfway through the swap.
+    private var isLoadingSkin = false
 
     // MARK: - Lifecycle
 
@@ -193,11 +215,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         }
     }
 
-    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { !isLoadingSkin }
 
     func application(_ sender: NSApplication, openFile filename: String) -> Bool {
         load(URL(fileURLWithPath: filename))
         return true
+    }
+
+    func applicationDockMenu(_ sender: NSApplication) -> NSMenu? {
+        let menu = NSMenu()
+        for path in recentSkins where FileManager.default.fileExists(atPath: path) {
+            let menuItem = NSMenuItem(title: Self.displayName(for: path),
+                                      action: #selector(openRecentSkin(_:)), keyEquivalent: "")
+            menuItem.target = self
+            menuItem.representedObject = path
+            menuItem.toolTip = path
+            menu.addItem(menuItem)
+        }
+        if !menu.items.isEmpty { menu.addItem(.separator()) }
+        menu.addItem(item("Open Skin…", #selector(openSkin(_:)), ""))
+        return menu
     }
 
     private func tick() {
@@ -353,6 +390,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
     private func load(_ url: URL, force: Bool = false) {
         if !force, main != nil, loadedURL == url { return }
+        isLoadingSkin = true
+        defer { isLoadingSkin = false }
         do {
             closeAll()
             let document = try SkinLoader.load(url)
@@ -405,10 +444,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         wire(controller)
         main = controller
         controller.window.level = alwaysOnTop ? .floating : .normal
-        controller.window.center()
-        controller.window.makeKeyAndOrderFront(nil)
+        if !restoreOrigin(controller) { controller.window.center() }
+        present(controller.window)
         controller.window.makeFirstResponder(controller.view)
-        NSApp.activate(ignoringOtherApps: true)
+        if !Self.quiet { NSApp.activate(ignoringOtherApps: true) }
     }
 
     private func wire(_ controller: ViewWindow) {
@@ -417,6 +456,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         controller.view.onContextMenu = { [weak self] event in self?.showContextMenu(event) }
         controller.view.onSound = { [weak self] name in self?.playSound(name, from: viewID) }
         controller.view.onPlaylistScroll = { [weak self] rows in self?.media.scrollPlaylist(by: rows) }
+        controller.view.onDropSkin = { [weak self] url in self?.load(url, force: true) }
+        controller.onMoved = { [weak self] origin in self?.saveOrigin(origin, for: viewID) }
         controller.visualizerStyle = visualizerStyle
         controller.onEffectChanged = { [weak self] index in
             guard let self else { return }
@@ -450,16 +491,53 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         main = nil
     }
 
+    // MARK: - Window positions
+
+    private var skinName: String {
+        loadedURL?.deletingPathExtension().lastPathComponent ?? "Untitled"
+    }
+
+    private func originKey(for viewID: String) -> String {
+        "windowOrigin.\(skinName).\(viewID)"
+    }
+
+    private func saveOrigin(_ origin: CGPoint, for viewID: String) {
+        guard loadedURL != nil else { return }
+        UserDefaults.standard.set(NSStringFromPoint(origin), forKey: originKey(for: viewID))
+    }
+
+    /// Puts a window back where this skin left it, on a screen that still
+    /// exists. Returns false when there is nothing to restore.
+    private func restoreOrigin(_ controller: ViewWindow) -> Bool {
+        guard let stored = UserDefaults.standard.string(forKey: originKey(for: controller.viewID)) else {
+            return false
+        }
+        let origin = clampedOrigin(NSPointFromString(stored), size: controller.window.frame.size)
+        controller.window.setFrameOrigin(origin)
+        return true
+    }
+
+    /// Window origins are absolute, so a skin opened on a monitor that is gone
+    /// would otherwise land off-screen. Keep the window inside a visible frame.
+    private func clampedOrigin(_ origin: CGPoint, size: CGSize) -> CGPoint {
+        let rect = CGRect(origin: origin, size: size)
+        let screen = NSScreen.screens.first { $0.visibleFrame.intersects(rect) } ?? NSScreen.main
+        guard let visible = screen?.visibleFrame else { return origin }
+        let x = min(max(origin.x, visible.minX), max(visible.minX, visible.maxX - size.width))
+        let y = min(max(origin.y, visible.minY), max(visible.minY, visible.maxY - size.height))
+        return CGPoint(x: x, y: y)
+    }
+
     // MARK: - Panels
 
     private func openPanelView(_ viewID: String) {
         guard let document else { return }
         if let main, main.viewID.caseInsensitiveCompare(viewID) == .orderedSame {
-            main.window.makeKeyAndOrderFront(nil)
+            present(main.window)
             return
         }
         if let existing = panels[viewID] {
-            existing.window.makeKeyAndOrderFront(nil)
+            present(existing.window)
             return
         }
         guard document.view(id: viewID) != nil, let scene = sceneCache[viewID] else { return }
@@ -470,8 +548,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
         let base = main?.window.frame.origin ?? CGPoint(x: 120, y: 120)
         let step = CGFloat(panels.count + 1) * 32
-        controller.window.setFrameOrigin(CGPoint(x: base.x + step, y: base.y - step))
-        controller.window.makeKeyAndOrderFront(nil)
+        if !restoreOrigin(controller) {
+            controller.window.setFrameOrigin(CGPoint(x: base.x + step, y: base.y - step))
+        }
+        present(controller.window)
         panels[viewID] = controller
         persistPanels()
         rebuildPanelsMenu()
@@ -593,8 +673,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
                 closePanel(viewID)
             }
         case .returnToMain:
-            main?.window.makeKeyAndOrderFront(nil)
-            NSApp.activate(ignoringOtherApps: true)
+            if let window = main?.window { present(window) }
+            if !Self.quiet { NSApp.activate(ignoringOtherApps: true) }
         case .openMedia:
             pickMediaFile()
         case .openURL(let string):
@@ -627,6 +707,67 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         sounds.play(url)
     }
 
+    // MARK: - Skins folder
+
+    private var skinsFolderURL: URL {
+        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent("Library/Application Support", isDirectory: true)
+        return support.appendingPathComponent("WMZPlayer/Skins", isDirectory: true)
+    }
+
+    @discardableResult
+    private func ensureSkinsFolder() -> URL {
+        let folder = skinsFolderURL
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        return folder
+    }
+
+    private func skinsInFolder() -> [URL] {
+        let folder = ensureSkinsFolder()
+        let files = (try? FileManager.default.contentsOfDirectory(
+            at: folder, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles])) ?? []
+        return files
+            .filter { $0.pathExtension.lowercased() == "wmz" }
+            .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
+            .prefix(20)
+            .map { $0 }
+    }
+
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        if menu === skinsMenu { rebuildSkinsMenu() }
+    }
+
+    private func rebuildSkinsMenu() {
+        skinsMenu.removeAllItems()
+        let skins = skinsInFolder()
+        if skins.isEmpty {
+            let empty = NSMenuItem(title: "No Skins in Folder", action: nil, keyEquivalent: "")
+            empty.isEnabled = false
+            skinsMenu.addItem(empty)
+        } else {
+            for url in skins {
+                let menuItem = NSMenuItem(title: url.deletingPathExtension().lastPathComponent,
+                                          action: #selector(openSkinFromFolder(_:)), keyEquivalent: "")
+                menuItem.target = self
+                menuItem.representedObject = url.path
+                menuItem.toolTip = url.path
+                skinsMenu.addItem(menuItem)
+            }
+        }
+        skinsMenu.addItem(.separator())
+        skinsMenu.addItem(item("Open Skins Folder", #selector(openSkinsFolder(_:)), ""))
+    }
+
+    @objc private func openSkinFromFolder(_ sender: NSMenuItem) {
+        guard let path = sender.representedObject as? String else { return }
+        load(URL(fileURLWithPath: path), force: true)
+    }
+
+    @objc private func openSkinsFolder(_ sender: Any?) {
+        NSWorkspace.shared.open(ensureSkinsFolder())
+    }
+
     // MARK: - Menu
 
     private func buildMenu() {
@@ -647,6 +788,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         let recentItem = NSMenuItem(title: "Open Recent", action: nil, keyEquivalent: "")
         recentItem.submenu = recentMenu
         fileMenu.addItem(recentItem)
+        fileMenu.addItem(.separator())
+        fileMenu.addItem(item("Open Skins Folder", #selector(openSkinsFolder(_:)), ""))
+        skinsMenu.delegate = self
+        let skinsItem = NSMenuItem(title: "Skins", action: nil, keyEquivalent: "")
+        skinsItem.submenu = skinsMenu
+        fileMenu.addItem(skinsItem)
+        fileMenu.addItem(.separator())
         fileMenu.addItem(item("Reload Skin", #selector(reloadSkin(_:)), "r"))
         fileItem.submenu = fileMenu
 
@@ -704,7 +852,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         case 124: menuItem.state = target == .spotify ? .on : .off
         case 125: menuItem.state = target == .tidal ? .on : .off
         default:
-            if let id = menuItem.representedObject as? String {
+            if menuItem.action == #selector(togglePanelFromMenu(_:)),
+               let id = menuItem.representedObject as? String {
                 menuItem.state = panels[id] != nil ? .on : .off
             }
         }

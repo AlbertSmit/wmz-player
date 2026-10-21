@@ -50,7 +50,7 @@ public final class JavaScriptHost: NSObject {
     private var reportedErrors = Set<String>()
     private var didActDuringCall = false
     private var effectIndex = 0
-    private let effectTitles = ["Bars", "Mirror", "Fine"]
+    private let effectTitles = ["Bars", "Wave", "Spikes", "Dots"]
 
     private var lastPlayState = ""
     private var lastTitle = ""
@@ -452,6 +452,93 @@ public final class JavaScriptHost: NSObject {
         if (id && !(id in globalThis)) { globalThis[id] = __mk(id); }
     });
 
+    // WMP's object model is case-insensitive and skins mix spellings freely
+    // (`player.Settings`, `theme.CurrentViewId`). This resolves an unknown
+    // spelling to the property we do define; the explicit aliases further down
+    // still cover the hot paths without a lookup.
+    function __caseInsensitive(target) {
+        var names = {};
+        Object.keys(target).forEach(function(k) { names[k.toLowerCase()] = k; });
+        return new Proxy(target, {
+            get: function(object, key) {
+                var name = String(key);
+                if (name in object) { return object[name]; }
+                var alias = names[name.toLowerCase()];
+                return alias === undefined ? undefined : object[alias];
+            },
+            set: function(object, key, value) {
+                var name = String(key);
+                object[(name in object) ? name : (names[name.toLowerCase()] || name)] = value;
+                return true;
+            }
+        });
+    }
+
+    // Playlist and library objects. We have no media library, so they are
+    // empty, but skins walk them (`getAll().count`, `item(i).getItemInfo(…)`)
+    // and must not trip over a missing method.
+    function __mediaItem() {
+        return {
+            name: '', artist: '', album: '', duration: 0, durationString: '0:00',
+            getItemInfo: function() { return ''; },
+            getItemInfoByAtom: function() { return ''; },
+            getAttributeName: function() { return ''; },
+            setItemInfo: function() { }
+        };
+    }
+    function __emptyList(name) {
+        return {
+            name: name || '',
+            count: 0,
+            item: function() { return null; },
+            getItemInfo: function() { return ''; }
+        };
+    }
+
+    var __currentPlaylist = {
+        get count() { return __bridge.playlistCount(); },
+        get name() { return __bridge.state('playlistName'); },
+        set name(v) { },
+        item: function(i) {
+            i = Number(i);
+            return i >= 0 && i < __bridge.playlistCount() ? __mediaItem() : null;
+        },
+        getItemInfo: function(i, key) { return ''; },
+        getItemInfoByAtom: function(i, atom) { return ''; }
+    };
+
+    var __mediaCollection = {
+        get count() { return 0; },
+        item: function() { return null; },
+        getItemInfo: function() { return ''; },
+        getAll: function() { return __emptyList(); },
+        getByAttribute: function() { return __emptyList(); },
+        getByAttributeStringCollection: function() { return __emptyList(); },
+        getByAlbum: function() { return __emptyList(); },
+        getByAuthor: function() { return __emptyList(); },
+        getMediaAtom: function() { return 0; },
+        add: function(media) { return media || __mediaItem(); },
+        remove: function() { }
+    };
+
+    var __playlistCollection = {
+        get count() { return 0; },
+        item: function() { return null; },
+        getAll: function() { return __emptyList(); },
+        getByName: function(name) { return __emptyList(name); },
+        newPlaylist: function(name) { return __emptyList(name); },
+        remove: function() { return false; }
+    };
+
+    var __cdromCollection = {
+        get count() { return 0; },
+        item: function() { return { eject: function() { }, driveSpecifier: '' }; },
+        get driveSpecifier() { return ''; }
+    };
+
+    var __fullScreen = false;
+    var __url = '';
+
     var player = {
         controls: {
             play: function() { __bridge.media('play'); },
@@ -462,7 +549,8 @@ public final class JavaScriptHost: NSObject {
             playpause: function() { __bridge.media('playpause'); },
             isAvailable: function() { return true; },
             get currentPosition() { return __bridge.state('position'); },
-            set currentPosition(v) { __bridge.media('seek:' + v); }
+            set currentPosition(v) { __bridge.media('seek:' + v); },
+            get currentPositionString() { return __bridge.state('positionString'); }
         },
         settings: {
             get volume() { return __bridge.state('volume'); },
@@ -482,10 +570,25 @@ public final class JavaScriptHost: NSObject {
             get durationString() { return __bridge.mediaInfo('durationString'); },
             get imageSourceWidth() { return 0; },
             get imageSourceHeight() { return 0; },
+            // Skins branch on this to tell CD/DVD from file playback.
+            get sourceURL() { return ''; },
             getItemInfo: function(key) { return __bridge.itemInfo(key); },
+            getItemInfoByAtom: function(atom) { return ''; },
+            getAttributeName: function() { return ''; },
             setItemInfo: function(key, value) { }
         },
-        get currentPlaylist() { return { count: __bridge.playlistCount() }; },
+        get currentPlaylist() { return __currentPlaylist; },
+        mediaCollection: __mediaCollection,
+        playlistCollection: __playlistCollection,
+        cdromCollection: __cdromCollection,
+        dvd: { isAvailable: function() { return false; }, title: 0, chapter: 0 },
+        versionInfo: '11.0.0.0',
+        get fullScreen() { return __fullScreen; },
+        set fullScreen(v) { __fullScreen = !!v; },
+        get URL() { return __url; },
+        set URL(v) { __url = String(v); },
+        launchURL: function(url) { __bridge.media('openurl:' + url); },
+        newPlaylist: function(name) { return __emptyList(name); },
         network: { bufferingProgress: 100, receptionQuality: 100, downloadProgress: 100 },
         get playState() { return __bridge.state('playState'); },
         get openState() { return __bridge.state('openState'); },
@@ -502,6 +605,8 @@ public final class JavaScriptHost: NSObject {
         closeView: function(id) { __bridge.closeView(id); },
         playSound: function(name) { __bridge.playSound(name); },
         openDialog: function(kind) { __bridge.openDialog(); },
+        openViewRelative: function(id) { __bridge.openView(id); },
+        logString: function(message) { },
         loadString: function(key) { return ''; },
         get currentViewID() { return __bridge.currentView(); },
         set currentViewID(v) { }
@@ -510,11 +615,16 @@ public final class JavaScriptHost: NSObject {
     var view = {
         get width() { return __bridge.viewSize('width'); },
         get height() { return __bridge.viewSize('height'); },
+        get minWidth() { return __bridge.viewSize('width'); },
+        get minHeight() { return __bridge.viewSize('height'); },
         get timerInterval() { return __bridge.timerInterval(); },
         set timerInterval(v) { __bridge.setTimerInterval(v); },
         get onTimer() { return __bridge.onTimer(); },
         set onTimer(v) { __bridge.setOnTimer(v); },
         returnToMediaCenter: function() { __bridge.returnToMain(); },
+        close: function() { __bridge.media('close'); },
+        minimize: function() { __bridge.media('minimize'); },
+        focusObjectID: '',
         size: function() {}
     };
 
@@ -584,6 +694,21 @@ public final class JavaScriptHost: NSObject {
     var strMediaURL = '';
 
     var event = { keyCode: 0, shiftKey: false, ctrlKey: false, altKey: false };
+
+    // Sub-objects are wrapped too: `player.currentPlaylist.Name` and
+    // `player.Controls.currentPosition` reach through the root alias.
+    player.controls = __caseInsensitive(player.controls);
+    player.settings = __caseInsensitive(player.settings);
+    player.currentMedia = __caseInsensitive(player.currentMedia);
+    player.network = __caseInsensitive(player.network);
+    player.dvd = __caseInsensitive(player.dvd);
+    __currentPlaylist = __caseInsensitive(__currentPlaylist);
+
+    player = __caseInsensitive(player);
+    theme = __caseInsensitive(theme);
+    view = __caseInsensitive(view);
+    mediacenter = __caseInsensitive(mediacenter);
+    eq = __caseInsensitive(eq);
     """#
 }
 
@@ -650,6 +775,12 @@ final class Bridge: NSObject, JavaScriptBridgeExports {
             if let argument { host.delegate?.jsPerform(.seek(argument)) }
         case "volume":
             if let argument { host.delegate?.jsPerform(.volume(argument / 100)) }
+        case "close": host.delegate?.jsPerform(.closeWindow)
+        case "minimize": host.delegate?.jsPerform(.minimizeWindow)
+        case "openurl":
+            if parts.count > 1, let url = URL(string: String(parts[1])) {
+                host.delegate?.jsPerform(.openURL(url.absoluteString))
+            }
         default: break
         }
     }
@@ -682,6 +813,8 @@ final class Bridge: NSObject, JavaScriptBridgeExports {
         let state = host.player
         switch key {
         case "position": return state.position
+        case "positionString": return timecode(state.position)
+        case "playlistName": return state.playlistName
         case "duration": return state.duration
         case "volume": return state.volume
         case "mute": return state.volume <= 0

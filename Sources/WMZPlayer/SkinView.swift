@@ -30,9 +30,11 @@ final class SkinView: NSView {
     var onScriptClick: ((SceneNode, MediaAction?) -> Bool)?
     var onHoverScript: ((SceneNode, Bool) -> Void)?
     var onKeyScript: ((UInt16) -> Void)?
+    var onDropSkin: ((URL) -> Void)?
 
     private(set) var hovered: SceneNode?
     private var pressed: SceneNode?
+    private var dropActive = false
     private var tracking: NSTrackingArea?
     private var sliderNode: SceneNode?
     private var stateStamp = Date()
@@ -64,6 +66,12 @@ final class SkinView: NSView {
         }
         renderer.spectrum = spectrum
         renderer.draw(in: context, state: display, hovered: hovered, pressed: pressed)
+        if dropActive {
+            NSColor.controlAccentColor.withAlphaComponent(0.8).setStroke()
+            let border = NSBezierPath(roundedRect: bounds.insetBy(dx: 1, dy: 1), xRadius: 4, yRadius: 4)
+            border.lineWidth = 2
+            border.stroke()
+        }
     }
 
     func update(state: PlayerState) {
@@ -232,6 +240,54 @@ final class SkinView: NSView {
 
     /// A floating skin should react to the click that activates it.
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    // MARK: - Dropping skins
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        registerForDraggedTypes([.fileURL])
+    }
+
+    private func droppedSkin(from sender: NSDraggingInfo) -> URL? {
+        let options: [NSPasteboard.ReadingOptionKey: Any] = [.urlReadingFileURLsOnly: true]
+        let urls = sender.draggingPasteboard.readObjects(forClasses: [NSURL.self], options: options) as? [URL] ?? []
+        return urls.first { $0.pathExtension.caseInsensitiveCompare("wmz") == .orderedSame }
+    }
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        let accepts = droppedSkin(from: sender) != nil
+        setDropActive(accepts)
+        return accepts ? .copy : []
+    }
+
+    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
+        draggingEntered(sender)
+    }
+
+    override func draggingExited(_ sender: NSDraggingInfo?) {
+        setDropActive(false)
+    }
+
+    override func prepareForDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        droppedSkin(from: sender) != nil
+    }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        setDropActive(false)
+        guard let url = droppedSkin(from: sender) else { return false }
+        onDropSkin?(url)
+        return true
+    }
+
+    override func concludeDragOperation(_ sender: NSDraggingInfo?) {
+        setDropActive(false)
+    }
+
+    private func setDropActive(_ active: Bool) {
+        guard dropActive != active else { return }
+        dropActive = active
+        needsDisplay = true
+    }
 
     /// Test hook: drives the same code path as a real click, without the OS
     /// event queue (used by `--click x,y`).

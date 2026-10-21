@@ -44,11 +44,14 @@ actually running.
   Default — lay out, animate and respond as designed.
 - **Animated GIFs and click sounds.** Multi-frame artwork animates at its own
   rate, honours play-once animations, and `theme.playSound` effects play.
-- **A real visualizer.** `<effects>` panes show FFT bars from the player's own
+- **A real visualizer.** `<effects>` panes show FFT output from the player's own
   audio (CoreAudio process tap, macOS 14.2+); the skin's effect buttons cycle
-  three styles, and the effect name label updates with them.
+  four shapes — bars, wave, spikes and dots — and the effect name label follows.
 - **The whole button map:** transport, mute, shuffle/repeat, volume, seek,
   panel open/close, file picker, URLs, close and minimize.
+- **Desktop manners.** Drag a `.wmz` onto the window, keep a library in
+  `~/Library/Application Support/WMZPlayer/Skins`, and windows remember where
+  you left them. The Dock menu lists recent skins.
 - **Apple Music, Spotify and Tidal**, chosen automatically or pinned in the menu.
 - **Double size, always-on-top, draggable** from anywhere that is not a control.
 - **A CLI for skinsmiths**: inspect a skin, render it offscreen, or ask what a
@@ -88,7 +91,7 @@ Without that permission those two players cannot be driven.
 
 | Action | How |
 | --- | --- |
-| Open a skin | Double-click the `.wmz`, or **File → Open Skin…** (`⌘O`) |
+| Open a skin | Double-click the `.wmz`, **File → Open Skin…** (`⌘O`), drag it onto the window, or pick from **File → Skins** |
 | Play / pause | Click the skin's button, or press **Space** |
 | Seek | Drag the skin's seek control, or press **← / →** |
 | Volume | Drag the skin's volume control, or press **↑ / ↓** |
@@ -166,7 +169,7 @@ The renderer supports the parts that carry the look of a skin:
 | Artwork | `backgroundImage` (plain and tiled), `backgroundColor`, transparency keying |
 | Controls | `<button>` normal/hover/down states, `<buttongroup>` with `mappingImage` zones |
 | Sliders | `<customSlider>` sprite strips; direction fitted from the artwork |
-| Playlist | `<playlist>` columns and colours, filled from Music's queue |
+| Playlist | `<playlist>` columns, colours and status line, filled from Music's queue |
 | Effects | `<effects>` shows album art, or FFT bars when the visualizer is on |
 | Animation | multi-frame GIF artwork plays at the file's own frame rate |
 | Script | the view's `scriptFile` runs in JavaScriptCore against a WMP-shaped object model |
@@ -217,8 +220,9 @@ Skins that build their interface from JScript at runtime — Microsoft's own
   still differ.
 - Each view runs its own context, so globals are not shared between the main
   window and its panels.
-- The playlist pages in another window of rows when you scroll near an edge;
-  it is not an endless virtual list.
+- The playlist pages in another window of rows near the edges and caches the
+  last few windows, so reversing direction is instant; it is not an endless
+  virtual list.
 - Tidal's metadata and seeking depend on the macOS build (see [Players](#players)).
 - Only Music exposes a queue; Spotify and Tidal show the now-playing row.
 - The equalizer panel renders and reacts, but cannot process another app's audio
@@ -289,7 +293,9 @@ open skin.png
 
 The app also accepts hidden test flags: `--click x,y`, `--drag x1,y1,x2,y2`,
 `--panel <id>` and `--panel-click x,y` (coordinates in skin pixels), which drive
-the same code path as a real mouse event. `WMZ_DEBUG_NP=1` logs what MediaRemote can see on your machine.
+the same code path as a real mouse event. `--headless` launches without taking
+focus or drawing on screen — `skin-sweep.sh` uses it so compatibility runs never
+interrupt you. `WMZ_DEBUG_NP=1` logs what MediaRemote can see on your machine.
 
 ## License
 

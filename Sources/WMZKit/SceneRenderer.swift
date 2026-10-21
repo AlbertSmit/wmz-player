@@ -18,7 +18,8 @@ public final class SceneRenderer {
             if spectrum == nil { spectrumRenderer.reset() }
         }
     }
-    /// 0 = bars, 1 = mirror, 2 = fine; cycled by the skin's effects buttons.
+    /// 0 = bars, 1 = wave, 2 = spikes, 3 = dots; cycled by the skin's
+    /// visualizer buttons.
     public var visualizerStyle: Int = 0 {
         didSet { spectrumRenderer = Self.makeSpectrumRenderer(visualizerStyle) }
     }
@@ -28,14 +29,16 @@ public final class SceneRenderer {
         var spectrumStyle = SpectrumStyle()
         switch style {
         case 1:
-            spectrumStyle.showsReflection = true
-            spectrumStyle.barGap = 4
-            spectrumStyle.reflectionAlpha = 0.32
-        case 2:
+            spectrumStyle.shape = .wave
             spectrumStyle.showsReflection = false
-            spectrumStyle.barGap = 1
-            spectrumStyle.cornerRadius = 0.5
+        case 2:
+            spectrumStyle.shape = .spikes
+            spectrumStyle.showsReflection = false
+        case 3:
+            spectrumStyle.shape = .dots
+            spectrumStyle.showsReflection = false
         default:
+            spectrumStyle.shape = .bars
             spectrumStyle.showsReflection = false
             spectrumStyle.barGap = 2
         }
@@ -380,6 +383,7 @@ public final class SceneRenderer {
         let lastIndex = state.playlistStart + state.playlistRows.count
         let widths = columnWidths(info, total: frame.width, maxIndex: lastIndex)
         let foreground = info.foregroundColor ?? RGB(r: 235, g: 235, b: 235)
+        let footer = playlistFooter(for: node, state: state, info: info)
         var y = frame.minY
 
         if info.columnsVisible {
@@ -388,11 +392,15 @@ public final class SceneRenderer {
             y += info.rowHeight
         }
 
-        let rowsHeight = frame.maxY - y
+        let rowsHeight = frame.maxY - y - footer.height
         guard rowsHeight > 0 else { ctx.restoreGState(); return }
         let visible = Int(ceil(rowsHeight / info.rowHeight))
         let offset = max(0, state.playlistOffset)
 
+        // The last row can be taller than what is left above the status line;
+        // clip it so its text cannot run into the footer.
+        ctx.saveGState()
+        ctx.clip(to: CGRect(x: frame.minX, y: y, width: frame.width, height: rowsHeight))
         for line in 0..<visible {
             let index = offset + line
             guard index < state.playlistRows.count else { break }
@@ -410,8 +418,67 @@ public final class SceneRenderer {
             drawPlaylistCells(cells, widths: widths, origin: CGPoint(x: frame.minX, y: top),
                               info: info, color: colour, bold: playing, ctx: ctx)
         }
+        ctx.restoreGState()
+
+        if footer.height > 0 {
+            drawPlaylistFooter(footer,
+                               in: CGRect(x: frame.minX, y: frame.maxY - footer.height,
+                                          width: frame.width, height: footer.height),
+                               info: info, ctx: ctx)
+        }
 
         ctx.restoreGState()
+    }
+
+    /// WMP's list view ends in a status line the skin words itself, usually the
+    /// total or selected time (`"Total Time: %duration%"`). The row area is
+    /// shortened so the line never covers the last row.
+    private struct PlaylistFooter {
+        let left: String
+        let right: String
+        let font: CGFloat
+
+        var height: CGFloat { left.isEmpty && right.isEmpty ? 0 : ceil(font * 1.7) }
+    }
+
+    private func playlistFooter(for node: SceneNode, state: PlayerState,
+                                info: PlaylistInfo) -> PlaylistFooter {
+        let font = min(10, max(9, info.fontSize - 1))
+        // The controller fills these in when the app handed it the element's
+        // templates; a bare renderer (`wmz render`) reads them off the element.
+        let left = state.playlistLeftStatus.isEmpty
+            ? MediaController.playlistStatus(node.element["leftstatus"] ?? "", state: state)
+            : state.playlistLeftStatus
+        let right = state.playlistRightStatus.isEmpty
+            ? MediaController.playlistStatus(node.element["rightstatus"] ?? "", state: state)
+            : state.playlistRightStatus
+        return PlaylistFooter(left: left, right: right, font: font)
+    }
+
+    private func drawPlaylistFooter(_ footer: PlaylistFooter, in rect: CGRect,
+                                    info: PlaylistInfo, ctx: CGContext) {
+        guard rect.width > 8, rect.height > 2 else { return }
+        let inset: CGFloat = 4
+        let canvas = CGSize(width: max(1, rect.width - inset * 2), height: rect.height)
+        let colour = dimmed(info.foregroundColor ?? RGB(r: 235, g: 235, b: 235),
+                            towards: info.backgroundColor ?? RGB(r: 0, g: 0, b: 0))
+        let destination = CGRect(x: rect.minX + inset, y: rect.minY,
+                                 width: canvas.width, height: canvas.height)
+        for (text, alignment) in [(footer.left, "left"), (footer.right, "right")] where !text.isEmpty {
+            guard let image = textImage(text, face: "Helvetica", size: footer.font, style: "",
+                                        colour: colour, alignment: alignment, canvas: canvas) else { continue }
+            drawImage(image, in: destination, ctx: ctx)
+        }
+    }
+
+    /// The status line sits one step back from the rows, as WMP drew it.
+    private func dimmed(_ colour: RGB, towards background: RGB) -> RGB {
+        func mix(_ foreground: Int, _ background: Int) -> Int {
+            (foreground * 55 + background * 45) / 100
+        }
+        return RGB(r: mix(colour.r, background.r),
+                   g: mix(colour.g, background.g),
+                   b: mix(colour.b, background.b))
     }
 
     private func drawPlaylistCells(_ cells: [String], widths: [CGFloat], origin: CGPoint,

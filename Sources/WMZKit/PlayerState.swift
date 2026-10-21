@@ -23,6 +23,14 @@ public struct PlayerState {
     public var playlistCurrent: Int = 0
     public var playlistStart: Int = 0
     public var playlistOffset: Int = 0
+    /// The `<playlist>` element's `leftStatus` / `rightStatus` templates, e.g.
+    /// `"Total Time: %duration%"`. Empty when the skin does not ask for a line.
+    public var playlistStatusLeftTemplate: String = ""
+    public var playlistStatusRightTemplate: String = ""
+    /// The templates above with their tokens filled in for the cached rows.
+    /// The renderer substitutes from the element when these are empty.
+    public var playlistLeftStatus: String = ""
+    public var playlistRightStatus: String = ""
 
     public init() {}
 

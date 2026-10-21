@@ -62,6 +62,30 @@ public final class MediaController {
     private var lastPlaylistKey = ""
     private var playlistLoading = false
     private var playlistCenter: Int?
+    /// The last windows the queue fetch returned, freshest first. Scrolling back
+    /// into one of them is served from here instead of another `osascript`
+    /// round-trip. Three windows is roughly 120 rows, enough to cover a wheel
+    /// spin in either direction.
+    private var recentWindows: [PlaylistWindow] = []
+
+    /// A page of the queue as `PlaylistLoader` returned it, kept so a later
+    /// request can be answered without going back to Music.
+    private struct PlaylistWindow {
+        let name: String
+        let total: Int
+        let currentIndex: Int
+        /// Absolute, 1-based index of `rows.first`.
+        let startIndex: Int
+        let rows: [PlaylistRow]
+
+        var lastIndex: Int { startIndex + rows.count - 1 }
+    }
+
+    /// `<playlist>` footer templates from the open skin, e.g.
+    /// `"Total Time: %duration%"`. The renderer reads them off the element; this
+    /// lets the app hand them over early, and the substituted strings then ride
+    /// along in `PlayerState`.
+    public var playlistStatusTemplates: (left: String, right: String) = ("", "")
 
     public init(target: Target = .auto) {
         self.target = target
@@ -108,6 +132,10 @@ public final class MediaController {
 
         if needsPlaylist {
             attachPlaylist(to: &next, backend: backend)
+            next.playlistStatusLeftTemplate = playlistStatusTemplates.left
+            next.playlistStatusRightTemplate = playlistStatusTemplates.right
+            next.playlistLeftStatus = Self.playlistStatus(next.playlistStatusLeftTemplate, state: next)
+            next.playlistRightStatus = Self.playlistStatus(next.playlistStatusRightTemplate, state: next)
         }
 
         state = next
@@ -156,12 +184,24 @@ public final class MediaController {
 
     private func pagePlaylist(around index: Int) {
         if ProcessInfo.processInfo.environment["WMZ_DEBUG_PLAYLIST"] != nil {
-            NSLog("pagePlaylist around=%d loading=%d needs=%d", index, playlistLoading ? 1 : 0, needsPlaylist ? 1 : 0)
+            NSLog("pagePlaylist around=%d loading=%d needs=%d cached=%d",
+                  index, playlistLoading ? 1 : 0, needsPlaylist ? 1 : 0, recentWindows.count)
         }
-        guard !playlistLoading, needsPlaylist else { return }
+        guard needsPlaylist else { return }
+
+        if let snapshot = cachedPage(around: index) {
+            if ProcessInfo.processInfo.environment["WMZ_DEBUG_PLAYLIST"] != nil {
+                NSLog("playlist paged around %d from cache: rows %d…%d",
+                      index, snapshot.startIndex, snapshot.startIndex + snapshot.rows.count - 1)
+            }
+            applyPage(snapshot, center: index, keepingTopRow: true)
+            return
+        }
+
+        guard !playlistLoading else { return }
         playlistLoading = true
         playlistCenter = index
-        PlaylistLoader.loadAsync(application: "Music", radius: 20, center: index) { [weak self] snapshot in
+        PlaylistLoader.loadAsync(application: "Music", radius: Self.pageRadius, center: index) { [weak self] snapshot in
             guard let self else { return }
             self.playlistLoading = false
             guard let snapshot else {
@@ -170,21 +210,124 @@ public final class MediaController {
                 }
                 return
             }
-            self.state.playlistName = snapshot.name
-            self.state.playlistRows = snapshot.rows
-            self.state.playlistTotal = snapshot.total
-            self.state.playlistCurrent = snapshot.currentIndex
-            self.state.playlistStart = snapshot.startIndex
-            // Keep roughly the same absolute row under the cursor.
-            self.state.playlistOffset = min(max(0, index - snapshot.startIndex - 6),
-                                            max(0, snapshot.rows.count - 1))
+            self.remember(snapshot)
+            self.applyPage(snapshot, center: index, keepingTopRow: false)
             if ProcessInfo.processInfo.environment["WMZ_DEBUG_PLAYLIST"] != nil {
                 NSLog("playlist paged around %d: rows %d…%d offset %d",
                       index, snapshot.startIndex, snapshot.startIndex + snapshot.rows.count - 1,
                       self.state.playlistOffset)
             }
-            self.onChange?(self.state)
         }
+    }
+
+    /// Drops a fetched window into `state` and updates the highlight: the
+    /// snapshot's `currentIndex` is the playing track, not the page's centre.
+    private func applyPage(_ snapshot: PlaylistSnapshot, center: Int?, keepingTopRow: Bool) {
+        // Preserve the absolute row at the top of the list when a cached page
+        // covers it, so a cache hit does not jump the viewport.
+        let top = state.playlistStart + state.playlistOffset
+        state.playlistName = snapshot.name
+        state.playlistRows = snapshot.rows
+        state.playlistTotal = snapshot.total
+        state.playlistCurrent = snapshot.currentIndex
+        state.playlistStart = snapshot.startIndex
+        if keepingTopRow, top > snapshot.startIndex,
+           top <= snapshot.startIndex + snapshot.rows.count - 1 {
+            state.playlistOffset = top - snapshot.startIndex
+        } else if let center {
+            // Keep roughly the same absolute row under the cursor.
+            state.playlistOffset = min(max(0, center - snapshot.startIndex - 6),
+                                       max(0, snapshot.rows.count - 1))
+        } else {
+            state.playlistOffset = min(state.playlistOffset, max(0, snapshot.rows.count - 1))
+        }
+        state.playlistLeftStatus = Self.playlistStatus(state.playlistStatusLeftTemplate, state: state)
+        state.playlistRightStatus = Self.playlistStatus(state.playlistStatusRightTemplate, state: state)
+        onChange?(state)
+    }
+
+    // MARK: - Paging cache
+
+    /// Rows either side of the centre that `pagePlaylist` asks for.
+    private static let pageRadius = 20
+
+    private func remember(_ snapshot: PlaylistSnapshot) {
+        // A queue that changed shape invalidates everything we kept: row numbers
+        // and the playing index would no longer line up.
+        if let newest = recentWindows.first,
+           newest.total != snapshot.total || newest.name != snapshot.name {
+            recentWindows.removeAll()
+        }
+        // Re-fetching the same window refreshes it rather than adding a copy.
+        recentWindows.removeAll { $0.startIndex == snapshot.startIndex && $0.rows.count == snapshot.rows.count }
+        recentWindows.insert(PlaylistWindow(name: snapshot.name, total: snapshot.total,
+                                            currentIndex: snapshot.currentIndex,
+                                            startIndex: snapshot.startIndex,
+                                            rows: snapshot.rows), at: 0)
+        if recentWindows.count > 3 { recentWindows.removeLast(recentWindows.count - 3) }
+    }
+
+    /// The page covering `index` when the kept windows already do, or nil when
+    /// the player has to be asked. A hit has to be as good as a fetch: the
+    /// windows are stitched together, and only a span they cover end to end is
+    /// served, or the user would scroll into a hole with no rows above it.
+    private func cachedPage(around index: Int) -> PlaylistSnapshot? {
+        guard let newest = recentWindows.first else { return nil }
+        // A window from another queue — or from before the track changed — would
+        // put row numbers or the highlight out of step.
+        let windows = recentWindows
+            .filter { $0.total == newest.total && $0.name == newest.name
+                      && $0.currentIndex == newest.currentIndex }
+            .sorted { $0.startIndex < $1.startIndex }
+        guard let oldest = windows.first else { return nil }
+
+        var rows = oldest.rows
+        var mergedEnd = oldest.lastIndex
+        for window in windows.dropFirst() where window.startIndex <= mergedEnd + 1 {
+            let overlap = max(0, mergedEnd - window.startIndex + 1)
+            rows.append(contentsOf: window.rows.dropFirst(overlap))
+            mergedEnd = window.lastIndex
+        }
+
+        let first = max(1, index - Self.pageRadius)
+        let last = min(newest.total, index + Self.pageRadius)
+        guard first <= last, first >= oldest.startIndex, last <= mergedEnd else { return nil }
+        let slice = Array(rows[(first - oldest.startIndex)...(last - oldest.startIndex)])
+        return PlaylistSnapshot(name: newest.name, total: newest.total,
+                                currentIndex: newest.currentIndex,
+                                startIndex: first, rows: slice)
+    }
+
+    /// Expands a `<playlist>` status template. Windows Media Player writes
+    /// these into the skin (`"Total Time: %duration%"`); only the tokens are
+    /// ours, and the surrounding words are the author's.
+    public static func playlistStatus(_ template: String, state: PlayerState) -> String {
+        guard !template.isEmpty else { return "" }
+        let total = state.playlistRows.reduce(0.0) { $0 + max(0, $1.duration) }
+        let selected = state.playlistRows.first { $0.index == state.playlistCurrent }
+        let substitutions = [
+            ("DurationString", durationText(total)),
+            ("SelectedDuration", durationText(selected?.duration ?? state.duration)),
+            ("SelectedCount", state.playlistRows.isEmpty ? "0" : "1"),
+            ("duration", durationText(total)),
+            ("count", String(state.playlistRows.count))
+        ]
+        var text = template
+        for (token, value) in substitutions {
+            text = text.replacingOccurrences(of: "%\(token)%", with: value, options: .caseInsensitive)
+        }
+        return text
+    }
+
+    /// `5:03` for a queue under an hour, `1:05:03` for anything longer.
+    static func durationText(_ seconds: Double) -> String {
+        let total = Int(max(0, seconds.rounded()))
+        let hours = total / 3600
+        let minutes = (total % 3600) / 60
+        let remainder = total % 60
+        return hours > 0
+            ? String(format: "%d:%02d:%02d", hours, minutes, remainder)
+            : String(format: "%d:%02d", minutes, remainder)
     }
 
     public func openFile(_ url: URL) {
@@ -242,7 +385,12 @@ public final class MediaController {
         guard !playlistLoading, trackChanged || stale else { return }
         lastPlaylistKey = key
         lastPlaylistFetch = Date()
-        if trackChanged { playlistCenter = nil }
+        if trackChanged {
+            playlistCenter = nil
+            // The cached windows carry the old track as `currentIndex`, so the
+            // highlight would be wrong until they were refetched anyway.
+            recentWindows.removeAll()
+        }
         playlistLoading = true
 
         PlaylistLoader.loadAsync(application: "Music", radius: 12, center: playlistCenter) { [weak self] snapshot in
@@ -254,17 +402,12 @@ public final class MediaController {
                 self.state.playlistCurrent = 0
                 self.state.playlistStart = 0
                 self.state.playlistOffset = 0
+                self.recentWindows.removeAll()
                 self.onChange?(self.state)
                 return
             }
-            self.state.playlistName = snapshot.name
-            self.state.playlistRows = snapshot.rows
-            self.state.playlistTotal = snapshot.total
-            self.state.playlistCurrent = snapshot.currentIndex
-            self.state.playlistStart = snapshot.startIndex
-            self.state.playlistOffset = min(self.state.playlistOffset,
-                                            max(0, snapshot.rows.count - 1))
-            self.onChange?(self.state)
+            self.remember(snapshot)
+            self.applyPage(snapshot, center: nil, keepingTopRow: true)
         }
     }
 

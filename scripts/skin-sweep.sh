@@ -47,7 +47,7 @@ for skin in "${BATCH[@]}"; do
   log="$LOGS/$(printf '%s' "$name" | tr -c 'A-Za-z0-9._-' '_').log"
 
   pkill -x WMZPlayer 2>/dev/null || true
-  args=("$skin")
+  args=("$skin" --headless)
   [[ -n "$PANEL" ]] && args+=(--panel "$PANEL")
   "$APP" "${args[@]}" >"$log" 2>&1 &
   pid=$!

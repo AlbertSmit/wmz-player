@@ -12,6 +12,21 @@ public struct SpectrumFrame {
     }
 }
 
+/// The visualisation drawn inside an `<effects>` pane.
+///
+/// The names echo the visualisations that shipped with Windows Media Player 9
+/// and 10, reimagined for one flat pass over the band data.
+public enum SpectrumShape: CaseIterable {
+    /// Discrete bars with falling peak caps and an optional reflection.
+    case bars
+    /// Oscilloscope-style smoothed polyline with a soft glow and a fill.
+    case wave
+    /// Tapered spikes from the centre line, mirrored below it, with bright tips.
+    case spikes
+    /// Grid of small cells: columns are bands, lit rows are energy.
+    case dots
+}
+
 /// Look of the spectrum. All sizes are in the context's coordinate space.
 public struct SpectrumStyle {
     public var barColor: CGColor
@@ -28,6 +43,10 @@ public struct SpectrumStyle {
     public var reflectionFraction: CGFloat
     public var reflectionAlpha: CGFloat
 
+    /// Which visualisation to draw. `barGap` spaces the columns of every
+    /// shape; peaks and the reflection only apply to `.bars`.
+    public var shape: SpectrumShape
+
     public init(
         barColor: CGColor = CGColor(srgbRed: 1.0, green: 0.62, blue: 0.18, alpha: 1),
         peakColor: CGColor = CGColor(srgbRed: 1.0, green: 0.86, blue: 0.58, alpha: 1),
@@ -37,7 +56,8 @@ public struct SpectrumStyle {
         peakFalloff: Double = 0.02,
         showsReflection: Bool = true,
         reflectionFraction: CGFloat = 0.25,
-        reflectionAlpha: CGFloat = 0.25
+        reflectionAlpha: CGFloat = 0.25,
+        shape: SpectrumShape = .bars
     ) {
         self.barColor = barColor
         self.peakColor = peakColor
@@ -48,14 +68,16 @@ public struct SpectrumStyle {
         self.showsReflection = showsReflection
         self.reflectionFraction = reflectionFraction
         self.reflectionAlpha = reflectionAlpha
+        self.shape = shape
     }
 }
 
-/// Draws a bar spectrum with falling peak caps and a faint mirrored
-/// reflection. Pure drawing: the caller owns the context and the clock.
+/// Draws a spectrum in one of several shapes: bars with falling peak caps,
+/// a glowing oscilloscope wave, centre-mirrored spikes or an energy grid.
+/// Pure drawing: the caller owns the context and the clock.
 ///
 /// The context is expected to be y-down (as used by `SceneRenderer`), so the
-/// bars grow upwards from the bottom of `rect`.
+/// visualisation grows upwards from the bottom of `rect`.
 public final class SpectrumRenderer {
     public let style: SpectrumStyle
 
@@ -106,7 +128,12 @@ public final class SpectrumRenderer {
         }
 
         updatePeaks(with: values)
-        drawSpectrum(values: values, in: bounds, ctx: ctx)
+        switch style.shape {
+        case .bars: drawBars(values: values, in: bounds, ctx: ctx)
+        case .wave: drawWave(values: values, in: bounds, ctx: ctx)
+        case .spikes: drawSpikes(values: values, in: bounds, ctx: ctx)
+        case .dots: drawDots(values: values, in: bounds, ctx: ctx)
+        }
     }
 
     // MARK: - Peak state
@@ -138,9 +165,9 @@ public final class SpectrumRenderer {
 
     // MARK: - Drawing
 
-    private func drawSpectrum(values: [CGFloat], in bounds: CGRect, ctx: CGContext) {
+    private func drawBars(values: [CGFloat], in bounds: CGRect, ctx: CGContext) {
         let count = values.count
-        let space = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
+        let space = sRGBSpace
 
         let baseColor = srgb(style.barColor)
         let tipColor = brightened(baseColor, by: 0.35)
@@ -158,12 +185,10 @@ public final class SpectrumRenderer {
         let stripHeight = bounds.height * reflectionFraction
         let meterHeight = bounds.height - stripHeight
         let baseline = bounds.minY + meterHeight
-
-        let requestedGap = style.barGap.isFinite ? max(0, style.barGap) : 0
-        let maxGap = count > 1 ? bounds.width / CGFloat(count - 1) * 0.6 : 0
-        let gap = min(requestedGap, maxGap)
-        let barWidth = (bounds.width - gap * CGFloat(count - 1)) / CGFloat(count)
-        guard barWidth > 0, meterHeight > 0 else { return }
+        guard let layout = columnLayout(count: count, in: bounds) else { return }
+        let barWidth = layout.width
+        let gap = layout.gap
+        guard meterHeight > 0 else { return }
 
         let reflectionGradient: CGGradient? = {
             guard reflection, stripHeight > 0 else { return nil }
@@ -234,7 +259,263 @@ public final class SpectrumRenderer {
         }
     }
 
+    // MARK: - Wave
+
+    private func drawWave(values: [CGFloat], in bounds: CGRect, ctx: CGContext) {
+        let baseColor = srgb(style.barColor)
+        let lineColor = brightened(baseColor, by: 0.18)
+
+        // Keep the crest off the very edge so the glow has room to breathe.
+        let inset = min(bounds.height * 0.1, 8)
+        let top = bounds.minY + inset
+        let bottom = bounds.maxY - inset
+        let span = bottom - top
+        guard span > 1 else { return }
+
+        let points = wavePoints(values: values, in: bounds, top: top, bottom: bottom)
+        guard points.count > 1, let last = points.last, let first = points.first else { return }
+
+        let line = smoothPath(points, clampY: top...bottom)
+        let fill = CGMutablePath()
+        fill.addPath(line)
+        fill.addLine(to: CGPoint(x: last.x, y: bottom))
+        fill.addLine(to: CGPoint(x: first.x, y: bottom))
+        fill.closeSubpath()
+
+        if let gradient = CGGradient(
+            colorsSpace: sRGBSpace,
+            colors: [
+                baseColor.copy(alpha: baseColor.alpha * 0.42) ?? baseColor,
+                baseColor.copy(alpha: 0.02) ?? baseColor
+            ] as CFArray,
+            locations: [0, 1]
+        ) {
+            ctx.saveGState()
+            ctx.addPath(fill)
+            ctx.clip()
+            ctx.drawLinearGradient(
+                gradient,
+                start: CGPoint(x: bounds.midX, y: top),
+                end: CGPoint(x: bounds.midX, y: bottom),
+                options: [.drawsBeforeStartLocation, .drawsAfterEndLocation]
+            )
+            ctx.restoreGState()
+        }
+
+        let blur = min(10, max(2, bounds.height * 0.055))
+        ctx.saveGState()
+        ctx.setShadow(offset: .zero, blur: blur,
+                      color: lineColor.copy(alpha: 0.8))
+        ctx.setStrokeColor(lineColor)
+        ctx.setLineWidth(2)
+        ctx.setLineJoin(.round)
+        ctx.setLineCap(.round)
+        ctx.addPath(line)
+        ctx.strokePath()
+        ctx.restoreGState()
+    }
+
+    private func wavePoints(values: [CGFloat], in bounds: CGRect,
+                            top: CGFloat, bottom: CGFloat) -> [CGPoint] {
+        guard !values.isEmpty else { return [] }
+        let span = bottom - top
+        if values.count == 1 {
+            let y = bottom - values[0] * span
+            return [CGPoint(x: bounds.minX, y: y), CGPoint(x: bounds.maxX, y: y)]
+        }
+        return values.indices.map { index in
+            let x = bounds.minX + bounds.width * CGFloat(index) / CGFloat(values.count - 1)
+            return CGPoint(x: x, y: bottom - values[index] * span)
+        }
+    }
+
+    /// Catmull-Rom through the points, expressed as cubic Beziers. Control
+    /// points are clamped vertically so a lone peak cannot loop outside the pane.
+    private func smoothPath(_ points: [CGPoint], clampY: ClosedRange<CGFloat>) -> CGPath {
+        let path = CGMutablePath()
+        guard let first = points.first else { return path }
+        path.move(to: first)
+        guard points.count > 1 else { return path }
+
+        func clamp(_ y: CGFloat) -> CGFloat {
+            min(max(y, clampY.lowerBound), clampY.upperBound)
+        }
+
+        for index in 0..<(points.count - 1) {
+            let previous = points[max(index - 1, 0)]
+            let current = points[index]
+            let next = points[index + 1]
+            let following = points[min(index + 2, points.count - 1)]
+            let control1 = CGPoint(x: current.x + (next.x - previous.x) / 6,
+                                   y: current.y + (next.y - previous.y) / 6)
+            let control2 = CGPoint(x: next.x - (following.x - current.x) / 6,
+                                   y: next.y - (following.y - current.y) / 6)
+            path.addCurve(
+                to: next,
+                control1: CGPoint(x: control1.x, y: clamp(control1.y)),
+                control2: CGPoint(x: control2.x, y: clamp(control2.y))
+            )
+        }
+        return path
+    }
+
+    // MARK: - Spikes
+
+    private func drawSpikes(values: [CGFloat], in bounds: CGRect, ctx: CGContext) {
+        guard let layout = columnLayout(count: values.count, in: bounds) else { return }
+        let centreY = bounds.midY
+        let baseColor = srgb(style.barColor)
+        let tipColor = srgb(style.peakColor)
+        let tipRadius = max(1, min(2.5, layout.width * 0.2))
+        // Leave room for the tip dot so a full band never clips at the top.
+        let reach = bounds.height / 2 - tipRadius - 1.5
+        guard reach > 0 else { return }
+
+        let spikeGradient = CGGradient(
+            colorsSpace: sRGBSpace,
+            colors: [baseColor, tipColor] as CFArray,
+            locations: [0, 1]
+        )
+        let mirrorColor = baseColor.copy(alpha: baseColor.alpha * 0.3) ?? baseColor
+
+        for index in values.indices {
+            let value = values[index]
+            guard value > 0.002 else { continue }
+
+            let columnX = bounds.minX + CGFloat(index) * (layout.width + layout.gap)
+            let centerX = columnX + layout.width / 2
+            let length = max(1, value * reach)
+            let baseHalf = max(0.5, layout.width * 0.42)
+            let tipHalf = max(0.35, baseHalf * 0.16)
+
+            // Dimmer mirror below the centre line, so the spike reads as centred.
+            ctx.setFillColor(mirrorColor)
+            ctx.addPath(spikePath(centerX: centerX, centreY: centreY,
+                                  baseHalf: baseHalf, tipHalf: tipHalf,
+                                  length: length * 0.7, upwards: false))
+            ctx.fillPath()
+
+            let spike = spikePath(centerX: centerX, centreY: centreY,
+                                  baseHalf: baseHalf, tipHalf: tipHalf,
+                                  length: length, upwards: true)
+            ctx.saveGState()
+            ctx.addPath(spike)
+            ctx.clip()
+            if let spikeGradient {
+                ctx.drawLinearGradient(
+                    spikeGradient,
+                    start: CGPoint(x: centerX, y: centreY),
+                    end: CGPoint(x: centerX, y: centreY - length),
+                    options: [.drawsBeforeStartLocation, .drawsAfterEndLocation]
+                )
+            } else {
+                ctx.setFillColor(baseColor)
+                ctx.fill(bounds)
+            }
+            ctx.restoreGState()
+
+            let tip = CGRect(x: centerX - tipRadius,
+                             y: centreY - length - tipRadius,
+                             width: tipRadius * 2, height: tipRadius * 2)
+            ctx.setFillColor(tipColor)
+            ctx.fillEllipse(in: tip)
+        }
+    }
+
+    private func spikePath(centerX: CGFloat, centreY: CGFloat,
+                           baseHalf: CGFloat, tipHalf: CGFloat,
+                           length: CGFloat, upwards: Bool) -> CGPath {
+        let direction: CGFloat = upwards ? -1 : 1
+        let tipY = centreY + direction * length
+        let path = CGMutablePath()
+        path.move(to: CGPoint(x: centerX - baseHalf, y: centreY))
+        path.addLine(to: CGPoint(x: centerX - tipHalf, y: tipY))
+        path.addLine(to: CGPoint(x: centerX + tipHalf, y: tipY))
+        path.addLine(to: CGPoint(x: centerX + baseHalf, y: centreY))
+        path.closeSubpath()
+        return path
+    }
+
+    // MARK: - Dots
+
+    private func drawDots(values: [CGFloat], in bounds: CGRect, ctx: CGContext) {
+        guard let layout = columnLayout(count: values.count, in: bounds) else { return }
+        let pitch = layout.width + layout.gap
+        guard pitch > 0 else { return }
+
+        // Roughly square cells, with a sane row budget for very tall panes.
+        let rowCount = max(2, min(12, Int((bounds.height / pitch).rounded())))
+        let rowPitch = bounds.height / CGFloat(rowCount)
+        let cellWidth = max(0.5, layout.width * 0.72)
+        let cellHeight = max(0.5, rowPitch * 0.68)
+        let radius = min(cellWidth, cellHeight) * 0.3
+
+        let dimPath = CGMutablePath()
+        let litPath = CGMutablePath()
+
+        for index in values.indices {
+            let columnX = bounds.minX + CGFloat(index) * (layout.width + layout.gap)
+            let cellX = columnX + (layout.width - cellWidth) / 2
+            let litRows = min(rowCount, Int((values[index] * CGFloat(rowCount)).rounded(.up)))
+
+            for row in 0..<rowCount {
+                let cellY = bounds.maxY - CGFloat(row + 1) * rowPitch + (rowPitch - cellHeight) / 2
+                let cell = CGRect(x: cellX, y: cellY, width: cellWidth, height: cellHeight)
+                let path = roundedPath(cell, radius: radius)
+                if row < litRows, values[index] > 0.001 {
+                    litPath.addPath(path)
+                } else {
+                    dimPath.addPath(path)
+                }
+            }
+        }
+
+        let baseColor = srgb(style.barColor)
+        ctx.setFillColor(baseColor.copy(alpha: min(0.12, baseColor.alpha * 0.12)) ?? baseColor)
+        ctx.addPath(dimPath)
+        ctx.fillPath()
+
+        guard !litPath.isEmpty else { return }
+        ctx.saveGState()
+        ctx.addPath(litPath)
+        ctx.clip()
+        if let gradient = CGGradient(
+            colorsSpace: sRGBSpace,
+            colors: [srgb(style.peakColor), baseColor] as CFArray,
+            locations: [0, 1]
+        ) {
+            ctx.drawLinearGradient(
+                gradient,
+                start: CGPoint(x: bounds.midX, y: bounds.minY),
+                end: CGPoint(x: bounds.midX, y: bounds.maxY),
+                options: [.drawsBeforeStartLocation, .drawsAfterEndLocation]
+            )
+        } else {
+            ctx.setFillColor(baseColor)
+            ctx.fill(bounds)
+        }
+        ctx.restoreGState()
+    }
+
+    // MARK: - Layout
+
+    /// Equal columns across the rect with the style's gap, shrunk when the
+    /// rect is too narrow for the requested gap.
+    private func columnLayout(count: Int, in bounds: CGRect) -> (width: CGFloat, gap: CGFloat)? {
+        guard count > 0 else { return nil }
+        let requestedGap = style.barGap.isFinite ? max(0, style.barGap) : 0
+        let maxGap = count > 1 ? bounds.width / CGFloat(count - 1) * 0.6 : 0
+        let gap = min(requestedGap, maxGap)
+        let width = (bounds.width - gap * CGFloat(count - 1)) / CGFloat(count)
+        guard width.isFinite, width > 0 else { return nil }
+        return (width, gap)
+    }
+
     // MARK: - Colours
+
+    private var sRGBSpace: CGColorSpace {
+        CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
+    }
 
     private func srgb(_ color: CGColor) -> CGColor {
         guard let converted = NSColor(cgColor: color)?.usingColorSpace(.sRGB) else { return color }

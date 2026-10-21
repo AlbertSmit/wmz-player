@@ -75,9 +75,11 @@ logged, and must never terminate the app.
 ### Phase 2 status
 
 Phase 2 gaps are closed: shared element registry, 2 s script execution cap,
-paged playlist windows, API stubs for `theme.loadString` and the visualizer
-effect properties, and a 46-case test suite (`swift test`). The visualizer's
-prev/next buttons cycle three bar styles.
+paged playlist windows with a small page cache, playlist status lines, API
+stubs for `theme.loadString` and the visualizer effect properties, desktop
+integration (drag and drop, skins folder, remembered window positions, Dock
+menu), and a 66-case test suite (`swift test`). The visualizer's prev/next
+buttons cycle four shapes: bars, wave, spikes and dots.
 
 - **Script host implemented.** JavaScriptCore runs the skin's own scripts, so
   timers, `moveTo` and `alphaBlendTo` animate the skin instead of being read
