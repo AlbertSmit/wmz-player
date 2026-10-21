@@ -18,6 +18,9 @@ final class ViewWindow: NSObject, NSWindowDelegate, JavaScriptHostDelegate {
     private var scale: CGFloat
     private var jsHost: JavaScriptHost?
 
+    private let synthetic = SyntheticSpectrum(bandCount: 28)
+    private let hasEffects: Bool
+
     var onOpenView: ((String) -> Void)?
     var onCloseView: ((String) -> Void)?
     var onReturnToMain: (() -> Void)?
@@ -40,6 +43,7 @@ final class ViewWindow: NSObject, NSWindowDelegate, JavaScriptHostDelegate {
         window.isReleasedWhenClosed = false
         window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
 
+        hasEffects = Self.containsEffects(scene.root)
         view = SkinView(frame: CGRect(origin: .zero, size: size))
         view.autoresizingMask = [.width, .height]
         view.bounds = CGRect(origin: .zero, size: scene.size)
@@ -72,6 +76,21 @@ final class ViewWindow: NSObject, NSWindowDelegate, JavaScriptHostDelegate {
             host.setEventKey(Int(code))
             _ = host.call(script)
         }
+    }
+
+    private static func containsEffects(_ node: SceneNode) -> Bool {
+        if node.kind == .effects { return true }
+        return node.children.contains(where: containsEffects)
+    }
+
+    /// Drives the demo visualizer; a captured spectrum will replace this.
+    func tickSpectrum(at time: TimeInterval) {
+        guard hasEffects else { return }
+        guard UserDefaults.standard.bool(forKey: "visualizerDemo") else {
+            if view.spectrum != nil { view.spectrum = nil }
+            return
+        }
+        view.spectrum = synthetic.next(at: time)
     }
 
     func apply(_ state: PlayerState) {
@@ -172,7 +191,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             let playing = controller.view.state.isPlaying
             let animating = controller.view.renderer?.lastFrameAnimated == true
             if playing || animating { controller.view.needsDisplay = true }
-            animated = animated || animating
+            controller.tickSpectrum(at: Date().timeIntervalSince1970)
+            if controller.view.spectrum != nil {
+                controller.view.needsDisplay = true
+                animated = true
+            }
         }
         // A static skin only needs the once-a-second media redraw, not 15 fps.
         redrawTimer?.tolerance = animated ? 0.01 : 0.2
@@ -508,6 +531,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         let windowMenu = NSMenu(title: "Window")
         windowMenu.addItem(tagged("Double Size", #selector(toggleScale(_:)), 110))
         windowMenu.addItem(tagged("Always on Top", #selector(toggleTop(_:)), 111))
+        windowMenu.addItem(tagged("Visualizer (demo bars)", #selector(toggleVisualizer(_:)), 112))
         windowMenu.addItem(.separator())
         windowMenu.addItem(withTitle: "Close", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
         windowItem.submenu = windowMenu
@@ -535,6 +559,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         case 103: menuItem.state = target == .tidal ? .on : .off
         case 110: menuItem.state = scale > 1 ? .on : .off
         case 111: menuItem.state = alwaysOnTop ? .on : .off
+        case 112: menuItem.state = UserDefaults.standard.bool(forKey: "visualizerDemo") ? .on : .off
         case 120: menuItem.state = alwaysOnTop ? .on : .off
         case 121: menuItem.state = scale > 1 ? .on : .off
         case 122: menuItem.state = target == .auto ? .on : .off
@@ -564,6 +589,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     @objc private func toggleScale(_ sender: Any?) {
         scale = scale > 1 ? 1 : 2
         for controller in allWindows() { controller.setScale(scale) }
+    }
+
+    @objc private func toggleVisualizer(_ sender: Any?) {
+        let key = "visualizerDemo"
+        UserDefaults.standard.set(!UserDefaults.standard.bool(forKey: key), forKey: key)
+        for controller in allWindows() { controller.view.needsDisplay = true }
     }
 
     @objc private func toggleTop(_ sender: Any?) {

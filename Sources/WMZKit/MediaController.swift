@@ -58,6 +58,7 @@ public final class MediaController {
     private var lastSeekWrite = Date.distantPast
     private var lastPlaylistFetch = Date.distantPast
     private var lastPlaylistKey = ""
+    private var playlistLoading = false
 
     public init(target: Target = .auto) {
         self.target = target
@@ -167,36 +168,55 @@ public final class MediaController {
     // MARK: - Queue
 
     private func attachPlaylist(to state: inout PlayerState, backend: PlayerBackend) {
-        let key = "\(backend.name)|\(state.title)|\(state.artist)"
-        let stale = Date().timeIntervalSince(lastPlaylistFetch) > 20
-        if key == lastPlaylistKey, !stale {
-            state.playlistName = self.state.playlistName
-            state.playlistRows = self.state.playlistRows
-            state.playlistTotal = self.state.playlistTotal
-            state.playlistCurrent = self.state.playlistCurrent
-            state.playlistStart = self.state.playlistStart
-            state.playlistOffset = self.state.playlistOffset
-            return
-        }
-        lastPlaylistKey = key
-        lastPlaylistFetch = Date()
-
-        if backend.name == "Music",
-           let snapshot = PlaylistLoader.load(application: "Music", radius: 12) {
-            state.playlistName = snapshot.name
-            state.playlistRows = snapshot.rows
-            state.playlistTotal = snapshot.total
-            state.playlistCurrent = snapshot.currentIndex
-            state.playlistStart = snapshot.startIndex
-        } else if state.hasTrack {
-            state.playlistRows = [PlaylistRow(index: 1, title: state.title, artist: state.artist,
-                                              album: state.album, duration: state.duration)]
-            state.playlistTotal = 1
-            state.playlistCurrent = 1
-            state.playlistStart = 1
-        }
+        // Start from what we already have; the fetch below is asynchronous.
+        state.playlistName = self.state.playlistName
+        state.playlistRows = self.state.playlistRows
+        state.playlistTotal = self.state.playlistTotal
+        state.playlistCurrent = self.state.playlistCurrent
+        state.playlistStart = self.state.playlistStart
         state.playlistOffset = min(max(0, self.state.playlistOffset),
                                    max(0, state.playlistRows.count - 1))
+
+        guard backend.name == "Music" else {
+            if state.hasTrack {
+                state.playlistRows = [PlaylistRow(index: 1, title: state.title, artist: state.artist,
+                                                  album: state.album, duration: state.duration)]
+                state.playlistTotal = 1
+                state.playlistCurrent = 1
+                state.playlistStart = 1
+                state.playlistOffset = 0
+            }
+            return
+        }
+
+        let key = "\(state.title)|\(state.artist)"
+        let stale = Date().timeIntervalSince(lastPlaylistFetch) > 20
+        guard !playlistLoading, key != lastPlaylistKey || stale else { return }
+        lastPlaylistKey = key
+        lastPlaylistFetch = Date()
+        playlistLoading = true
+
+        PlaylistLoader.loadAsync(application: "Music", radius: 12) { [weak self] snapshot in
+            guard let self else { return }
+            self.playlistLoading = false
+            guard let snapshot else {
+                self.state.playlistRows = []
+                self.state.playlistTotal = 0
+                self.state.playlistCurrent = 0
+                self.state.playlistStart = 0
+                self.state.playlistOffset = 0
+                self.onChange?(self.state)
+                return
+            }
+            self.state.playlistName = snapshot.name
+            self.state.playlistRows = snapshot.rows
+            self.state.playlistTotal = snapshot.total
+            self.state.playlistCurrent = snapshot.currentIndex
+            self.state.playlistStart = snapshot.startIndex
+            self.state.playlistOffset = min(self.state.playlistOffset,
+                                            max(0, snapshot.rows.count - 1))
+            self.onChange?(self.state)
+        }
     }
 
     // MARK: - Coalesced writes

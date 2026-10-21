@@ -14,6 +14,8 @@ final class SkinView: NSView {
     var state = PlayerState() {
         didSet { needsDisplay = true }
     }
+    /// Synthetic or captured spectrum for `<effects>` panes.
+    var spectrum: SpectrumFrame?
 
     var renderer: SceneRenderer?
     var onAction: ((MediaAction) -> Void)?
@@ -55,6 +57,7 @@ final class SkinView: NSView {
             let elapsed = Date().timeIntervalSince(stateStamp)
             display.position = min(display.duration, display.position + elapsed)
         }
+        renderer.spectrum = spectrum
         renderer.draw(in: context, state: display, hovered: hovered, pressed: pressed)
     }
 

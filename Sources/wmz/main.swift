@@ -14,7 +14,7 @@ func usage() -> Never {
       wmz inspect <skin.wmz>        List views and controls
                   [--view <id>]
       wmz render  <skin.wmz>        Render a PNG preview
-                  [--out <file>] [--scale <n>] [--view <id>] [--on <hex>] [--playing]
+                  [--out <file>] [--scale <n>] [--view <id>] [--on <hex>] [--playing] [--spectrum]
       wmz hit     <skin.wmz>        What does a click at x,y do?
                   --at <x,y> [--view <id>] [--playing]
       wmz queue                      Print the current Music queue window
@@ -142,7 +142,9 @@ do {
         let scale = CGFloat(Double(value("--scale") ?? "2") ?? 2)
         let state = previewState(playing: arguments.contains("--playing"))
         let background = RGB(hex: value("--on"))
-        guard let image = renderer.image(state: state, scale: scale, background: background) else {
+        let spectrum = arguments.contains("--spectrum")
+            ? SyntheticSpectrum(bandCount: 28).next(at: 1.7) : nil
+        guard let image = renderer.image(state: state, scale: scale, background: background, spectrum: spectrum) else {
             FileHandle.standardError.write(Data("Could not render the skin.\n".utf8))
             exit(1)
         }

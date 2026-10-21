@@ -72,6 +72,20 @@ The static engine stays as a fallback: a skin with broken or unsupported script
 still renders and still plays. JS exceptions are caught at the call boundary,
 logged, and must never terminate the app.
 
+### Phase 2 status
+
+- **Script host implemented.** JavaScriptCore runs the skin's own scripts, so
+  timers, `moveTo` and `alphaBlendTo` animate the skin instead of being read
+  and discarded.
+- **Shared element registry.** All views resolve element ids through one
+  registry, so a script that moves or hides an element is seen by every panel.
+- **Known gaps.** Script errors that are bugs in the skin itself are not yet
+  catalogued, so `scripts/skin-sweep.sh` output has to be read by hand; the
+  `<effects>` panel still shows artwork because there is no audio visualizer
+  yet; the Music queue fetch moved off the main thread, which keeps the window
+  responsive but lets the playlist panel open empty until the fetch lands.
+- **Remaining phases.** Phase 3 (visualizer) and Phase 4 (equalizer).
+
 ## Phase 3 — visualizer
 
 Tap the audio with `AudioHardwareCreateProcessTap` (macOS 14.2+), scoped to the

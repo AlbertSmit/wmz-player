@@ -12,6 +12,13 @@ public final class SceneRenderer {
     private var textCache: [String: CGImage] = [:]
     /// Set while drawing so the window knows it needs a fast redraw timer.
     public private(set) var lastFrameAnimated = false
+    /// When set, `<effects>` draws a spectrum instead of album art.
+    public var spectrum: SpectrumFrame? {
+        didSet {
+            if spectrum == nil { spectrumRenderer.reset() }
+        }
+    }
+    private let spectrumRenderer = SpectrumRenderer()
 
     public init(scene: Scene) {
         self.scene = scene
@@ -102,7 +109,12 @@ public final class SceneRenderer {
         case .effects:
             ctx.setFillColor(CGColor(red: 0, green: 0, blue: 0, alpha: 1))
             ctx.fill(node.frame)
-            drawArtwork(node, state: state, ctx: ctx)
+            if let spectrum, node.frame.width > 8, node.frame.height > 8 {
+                spectrumRenderer.draw(spectrum, in: node.frame, ctx: ctx)
+                lastFrameAnimated = true
+            } else {
+                drawArtwork(node, state: state, ctx: ctx)
+            }
 
         case .playlist:
             drawPlaylist(node, state: state, ctx: ctx)
@@ -477,7 +489,9 @@ public final class SceneRenderer {
 // MARK: - Offscreen rendering
 
 extension SceneRenderer {
-    public func image(state: PlayerState, scale: CGFloat = 2, background: RGB? = nil) -> CGImage? {
+    public func image(state: PlayerState, scale: CGFloat = 2, background: RGB? = nil,
+                      spectrum: SpectrumFrame? = nil) -> CGImage? {
+        self.spectrum = spectrum
         let width = Int(scene.size.width * scale)
         let height = Int(scene.size.height * scale)
         guard width > 0, height > 0,

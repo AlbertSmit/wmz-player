@@ -53,7 +53,8 @@ public struct PlaylistSnapshot {
 /// Every entry point must be called on the main thread: `NSAppleScript` pumps
 /// the calling thread's run loop while it waits for Music, and scripts that
 /// resolve object references (`current playlist`, `current track`) deadlock
-/// when run from a plain dispatch queue.
+/// when run from a plain dispatch queue. `loadAsync` is the exception: it hands
+/// the query to `osascript`, which has a main thread of its own.
 public enum PlaylistLoader {
 
     /// Rows around the current track. Returns nil when nothing is playing or
@@ -130,6 +131,22 @@ public enum PlaylistLoader {
         )
     }
 
+    /// Same query as `load`, but runs `osascript` on a background queue and
+    /// calls back on the main queue. Never blocks the caller.
+    ///
+    /// Multi-step scripts cannot run off the main thread here, so a subprocess
+    /// is the only way to keep a 35k-track library from stalling the UI.
+    public static func loadAsync(application: String, radius: Int,
+                                 completion: @escaping (PlaylistSnapshot?) -> Void) {
+        let radius = max(0, radius)
+        let script = textScript(application: application, radius: radius)
+        DispatchQueue.global(qos: .utility).async {
+            let output = runOSAScript(script)
+            let snapshot = output.flatMap { parseText($0, radius: radius) }
+            DispatchQueue.main.async { completion(snapshot) }
+        }
+    }
+
     /// Plays an absolute, 1-based index in the current playlist.
     public static func play(index: Int, application: String) -> Bool {
         guard index > 0 else { return false }
@@ -190,6 +207,141 @@ public enum PlaylistLoader {
     }
 
     // MARK: - Plumbing
+
+    /// The same query as `load`, but returning one tab-separated line per row:
+    /// `osascript` prints a returned string verbatim, while a list would come
+    /// back as a human-readable dump. `tab` and `linefeed` are AppleScript
+    /// constants, so the source stays free of control characters.
+    ///
+    /// The `is running` test does not launch the app, and a `tell` block would,
+    /// so a background poll must not skip it.
+    private static func textScript(application: String, radius: Int) -> String {
+        """
+        if application \(quoted(application)) is not running then return ""
+        tell application \(quoted(application))
+            try
+                set p to current playlist
+            on error
+                return ""
+            end try
+            set n to (count of tracks of p)
+            set idx to 0
+            try
+                set idx to (index of current track)
+            end try
+            if n is 0 or idx < 1 then return ""
+            set firstIndex to idx - \(radius)
+            if firstIndex < 1 then set firstIndex to 1
+            set lastIndex to idx + \(radius)
+            if lastIndex > n then set lastIndex to n
+            set out to ((n as string) & tab & (idx as string) & tab & (name of p) & linefeed)
+            repeat with i from firstIndex to lastIndex
+                try
+                    set t to track i of p
+                    set out to out & (name of t) & tab & (artist of t) & tab & (album of t) & tab & (((duration of t) as integer) as string) & linefeed
+                on error
+                    set out to out & tab & tab & tab & "0" & linefeed
+                end try
+            end repeat
+            return out
+        end tell
+        """
+    }
+
+    /// Runs the script in a child `osascript` and returns what it printed, or
+    /// nil when it failed, stayed silent, or outlived the watchdog.
+    private static func runOSAScript(_ source: String) -> String? {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        process.arguments = ["-e", source]
+
+        let stdout = Pipe()
+        let stderr = Pipe()
+        process.standardOutput = stdout
+        process.standardError = stderr
+
+        let exited = DispatchSemaphore(value: 0)
+        process.terminationHandler = { _ in exited.signal() }
+        do {
+            try process.run()
+        } catch {
+            NSLog("WMZPlayer: osascript failed to start: \(error)")
+            return nil
+        }
+
+        // Both pipes are drained on their own queues: a child that fills one
+        // buffer would otherwise block before it could exit.
+        let drained = DispatchGroup()
+        var out = Data()
+        var diagnostics = Data()
+        drained.enter()
+        DispatchQueue.global(qos: .utility).async {
+            out = stdout.fileHandleForReading.readDataToEndOfFile()
+            drained.leave()
+        }
+        drained.enter()
+        DispatchQueue.global(qos: .utility).async {
+            diagnostics = stderr.fileHandleForReading.readDataToEndOfFile()
+            drained.leave()
+        }
+
+        guard exited.wait(timeout: .now() + 10) == .success else {
+            process.terminate()
+            // Give the termination handler a moment to reap it; without the
+            // wait the killed child would linger as a zombie.
+            _ = exited.wait(timeout: .now() + 2)
+            NSLog("WMZPlayer: playlist script timed out")
+            return nil
+        }
+        // The child has exited, so both read ends see EOF right away; the wait
+        // is only there so a stuck drain cannot leak the caller's queue.
+        guard drained.wait(timeout: .now() + 1) == .success else { return nil }
+        guard process.terminationStatus == 0 else {
+            let message = String(data: diagnostics, encoding: .utf8) ?? ""
+            NSLog("WMZPlayer: osascript failed: \(message)")
+            return nil
+        }
+        return String(data: out, encoding: .utf8)
+    }
+
+    /// Mirrors the descriptor walk in `load`. A row that does not parse still
+    /// consumes an index, so the numbers stay aligned with the playlist.
+    private static func parseText(_ output: String, radius: Int) -> PlaylistSnapshot? {
+        let lines = output.split(separator: "\n", omittingEmptySubsequences: true)
+        guard let header = lines.first else { return nil }
+        let fields = header.split(separator: "\t", omittingEmptySubsequences: false)
+        guard fields.count >= 3,
+              let total = Int(fields[0]),
+              let current = Int(fields[1]),
+              total > 0, current >= 1
+        else { return nil }
+
+        let startIndex = max(1, current - radius)
+        var rows: [PlaylistRow] = []
+        rows.reserveCapacity(lines.count)
+        for (offset, line) in lines.dropFirst().enumerated() {
+            let row = line.split(separator: "\t", omittingEmptySubsequences: false)
+            guard row.count >= 4, let duration = Int(row[row.count - 1]) else { continue }
+            rows.append(PlaylistRow(
+                index: startIndex + offset,
+                title: String(row[0]),
+                artist: String(row[1]),
+                // A tab inside a track name pushes the fields right; the
+                // surplus lands in the album rather than losing the row.
+                album: row[2..<(row.count - 1)].joined(separator: "\t"),
+                duration: Double(duration)
+            ))
+        }
+        guard !rows.isEmpty else { return nil }
+
+        return PlaylistSnapshot(
+            name: fields[2...].joined(separator: "\t"),
+            total: total,
+            currentIndex: current,
+            startIndex: startIndex,
+            rows: rows
+        )
+    }
 
     private static func execute(_ source: String) -> NSAppleEventDescriptor? {
         guard let script = NSAppleScript(source: source) else { return nil }
