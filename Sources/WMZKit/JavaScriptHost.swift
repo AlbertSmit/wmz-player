@@ -414,6 +414,7 @@ public final class JavaScriptHost: NSObject {
             setItemInfo: function(key, value) { }
         },
         get currentPlaylist() { return { count: __bridge.playlistCount() }; },
+        network: { bufferingProgress: 100, receptionQuality: 100, downloadProgress: 100 },
         get playState() { return __bridge.state('playState'); },
         get openState() { return __bridge.state('openState'); },
         get status() { return __bridge.mediaInfo('name'); }
